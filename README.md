@@ -50,6 +50,24 @@ Tonfotos 官方支持将已确认的人名和人脸区域写入 XMP，也可在�
 
 YuNet 模型 SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`，来源固定 OpenCV Zoo 提交 `47534e27c9851bb1128ccc0102f1145e27f23f98`，MIT 许可随模型保存在 `/opt/ofiq/yunet/LICENSE`。API 照片字段包含 `eligible`、`qualified`、`qualityIssues`、`assessmentFace` 和 `imageSize`，网页与元数据使用同一后端资格判断。
 
+## 模型对比实验
+
+`scripts/compare-fiqa.py` 对单个图库做只读实验，不修改正式评分、原文件、基线或历史。`prepare` 固定输入，`serfiq` 使用官方 ArcFace 权重及 SER-FIQ 评分函数，`faceqnet` 使用官方 FaceQnet v1，`render` 输出 Top 5 对照和全部评分。SER-FIQ 用 T=100、三个固定种子取平均；原始网络仅在 bn1 后有随机层，因此复用一次确定性骨干，随机头仍执行 100 次，与完整原网络核对输出一致。两个模型共享 MTCNN 单人复核；FaceQnet 用人脸框裁切和官方 BGR float32 224×224 输入，SER-FIQ 用五点对齐 RGB 112×112 输入。
+
+实验环境、官方权重、输入副本和逐图结果放 `/vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012/`。参考源码在 `/vol1/1000/Code/face-quality-reference/`，提交和模型散列记入结果；实验依赖不安装到正式服务。独立预览产物在同服务 `previews/fiqa-xiaoyu/`，复用现有预览入口 [小钰 Top 5 对照](http://192.168.31.201:33080/fiqa-xiaoyu/)。原图只通过既有只读 API 查看。
+
+复现实验（使用已安装的实验环境和已解压官方权重）：
+
+```sh
+BENCH_PY=/vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012/venv/bin/python
+BENCH_DATA=/vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012
+"$BENCH_PY" scripts/compare-fiqa.py prepare --output "$BENCH_DATA"
+"$BENCH_PY" scripts/compare-fiqa.py serfiq --output "$BENCH_DATA"
+"$BENCH_PY" scripts/compare-fiqa.py faceqnet --output "$BENCH_DATA"
+"$BENCH_PY" scripts/compare-fiqa.py render --output "$BENCH_DATA"
+```
+
+
 ## 目录与部署
 
 - 源码 `/home/yuwk/code/face-baseline`；设计来自
