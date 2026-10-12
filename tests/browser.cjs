@@ -1,0 +1,35 @@
+const fs = require('node:fs/promises')
+const path = require('node:path')
+const assert = require('node:assert/strict')
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
+
+async function main() {
+  const [baseUrl, personId, output] = process.argv.slice(2)
+  await fs.mkdir(output, { recursive: true })
+  const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true })
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+    const errors = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.goto(baseUrl, { waitUntil: 'networkidle' })
+    await page.getByRole('heading', { name: '人物图库', exact: true }).waitFor()
+    assert.equal(await page.getByText('演示工具', { exact: true }).count(), 0)
+    await page.screenshot({ path: path.join(output, 'overview.png') })
+    await page.goto(baseUrl + '/#/person/' + personId, { waitUntil: 'networkidle' })
+    await page.getByRole('tab', { name: /候选 Top/ }).waitFor()
+    await page.screenshot({ path: path.join(output, 'detail.png') })
+    await page.goto(baseUrl + '/#/settings', { waitUntil: 'networkidle' })
+    await page.getByRole('heading', { name: '扫描与设置', exact: true }).waitFor()
+    await page.screenshot({ path: path.join(output, 'settings.png') })
+    await page.setViewportSize({ width: 390, height: 844 })
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    await page.screenshot({ path: path.join(output, 'mobile-settings.png') })
+    await page.goto(baseUrl + '/#/person/' + personId, { waitUntil: 'networkidle' })
+    await page.getByRole('tab', { name: /候选 Top/ }).waitFor()
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    await page.screenshot({ path: path.join(output, 'mobile-detail.png') })
+    assert.deepEqual(errors, [])
+    console.log(JSON.stringify({ desktop: true, mobile: true, horizontalOverflow: false, pageErrors: errors }))
+  } finally { await browser.close() }
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })

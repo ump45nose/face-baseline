@@ -1,0 +1,9 @@
+# NAS's authoritative deployment is utilities/compose.yaml, not this example.
+services:
+  face-baseline:
+    image: local/face-baseline:1.0.0
+    user: '1000:1001'
+    ports: ['127.0.0.1:33081:8080']
+    volumes:
+      - /vol2/1000/Docker/face-baseline/data:/data
+      - /vol3/1000/Picture/YY/人物:/vol3/1000/Picture/YY/人物

@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --color-paper: #faf9f6;
+  --color-side: #f3f2ee;
+  --color-card: #ffffff;
+  --color-canvas: #efeee9;
+  --color-well: #f0efea;
+  --color-line: #e7e5df;
+  --color-line-2: #d9d6ce;
+  --color-ink: #1b1e1c;
+  --color-ink-2: #535955;
+  --color-muted: #8b908c;
+  --color-moss: #2d5b47;
+  --color-moss-2: #234838;
+  --color-moss-soft: #e7efea;
+  --color-amber: #a3650f;
+  --color-amber-soft: #fbf1dc;
+  --color-danger: #b2412c;
+  --color-danger-soft: #f9e8e3;
+}
+
+html, body { background: var(--color-paper); color: var(--color-ink); }
+body { font-family: var(--font-sans); font-size: 14px; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--color-moss) 55%, transparent); outline-offset: 2px; }
