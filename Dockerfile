@@ -16,6 +16,7 @@ COPY --from=native --chown=1000:1001 /libofiq /opt/ofiq/lib
 COPY --from=ofiq --chown=1000:1001 source/data/ofiq_config.jaxn /opt/ofiq/data/ofiq_config.jaxn
 COPY --from=ofiq --chown=1000:1001 source/data/models /opt/ofiq/data/models
 COPY --from=ofiq --chown=1000:1001 source/LICENSE.md /opt/ofiq/LICENSE.md
+COPY --from=ofiq --chown=1000:1001 yunet /opt/ofiq/yunet
 COPY --chown=1000:1001 backend /app/backend
 COPY --chown=1000:1001 web/dist /app/web
 ENV PATH=/opt/venv/bin:$PATH LD_LIBRARY_PATH=/opt/ofiq/lib PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=2

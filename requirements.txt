@@ -3,3 +3,5 @@ uvicorn==0.37.0
 Pillow==11.3.0
 pytest==8.4.2
 httpx==0.28.1
+numpy==1.26.4
+opencv-python-headless==4.10.0.84

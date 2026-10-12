@@ -33,7 +33,7 @@ export default function Detail({ id }: { id: string }) {
   const lock = async (ph: Photo) => {
     if (busy) return toast(BUSY_REASON, 'amber')
     await api.lock(person.id, ph.id)
-    ph.score! < s.threshold ? toast('已锁定。该照片质量不足，将持续显示警示', 'amber') : toast('已设为基线并锁定')
+    !ph.qualified ? toast('已锁定。该照片质量不足，将持续显示警示', 'amber') : toast('已设为基线并锁定')
   }
   const unlock = async () => {
     await api.unlock(person.id)
@@ -112,6 +112,8 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
         <PhotoCanvas
           url={b?.url ?? null}
           thumbnailUrl={b?.thumbnailUrl}
+          faceBox={b?.assessmentFace}
+          imageSize={b?.imageSize}
           alt={`${person.name} 当前基线`}
           className="aspect-[4/5] sm:aspect-auto sm:h-[440px] lg:h-full lg:min-h-[440px]"
           empty={{
@@ -142,9 +144,12 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
             </div>
             {!d.reliable && (
               <div className="mt-4 rounded-lg bg-amber-soft px-3 py-2.5 text-[13px] leading-relaxed text-amber">
-                <span className="font-medium">缺少可靠基线。</span>该照片低于门槛，仅作为手动选择保留。
+                <span className="font-medium">缺少可靠基线。</span>该照片未通过全部质量检查，仅作为手动选择保留。
               </div>
             )}
+
+            <p className="mt-3 text-[11px] text-muted">绿色框标出实际评分人脸。OFIQ 总分由独立模型计算，不是下方分项的平均值。</p>
+            {b.qualityIssues.length > 0 && <ul className="mt-3 space-y-1 text-xs text-amber">{b.qualityIssues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
 
             <div className="mt-5 space-y-2.5 border-t border-line pt-4">
               {reasons(b).map((r) => (
@@ -198,13 +203,14 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
             <div className="text-[22px] font-semibold text-amber">缺少可靠基线</div>
             <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
               {d.scored.length
-                ? `${d.scored.length} 张已评分单人照片均低于合格门槛 ${s.threshold} 分。可在候选或全部照片中手动锁定一张，或补充更清晰的正脸照片。`
-                : '无脸、多人、解码失败或评分失败的照片不能作为基线。请向该人物目录补充单人照片。'}
+                ? `${d.scored.length} 张已复核单人照片未能通过全部质量检查。可在候选或全部照片中查看原因、手动锁定，或补充更清晰的正脸照片。`
+                : '暂无通过新版单人复核的照片。旧结果需重新扫描；无脸、多人或评分失败的照片不能作为基线。'}
             </p>
             <dl className="mt-5 border-t border-line pt-3">
               <Row label="最高分">{d.top[0] ? `${d.top[0].score} 分` : '—'}</Row>
               <Row label="门槛">{s.threshold} 分</Row>
             </dl>
+            {person.lockedPhotoId && <Button variant="ghost" icon="unlock" onClick={onUnlock} disabled={busy} className="mt-5">取消锁定，恢复自动</Button>}
           </div>
         )}
       </aside>
@@ -215,15 +221,17 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
 /* ---------- 候选卡 ---------- */
 function Candidate({ p, rank, d, s, busy, onLock, dup }: { p: Photo; rank?: number; d: Derived; s: Settings; busy: boolean; onLock: (p: Photo) => void; dup?: number }) {
   const [open, setOpen] = useState(false)
-  const scored = p.status === 'ok' && p.score != null
+  const scored = p.eligible
   const isLocked = d.locked?.id === p.id
   const isBase = d.baseline?.id === p.id
-  const pass = scored && p.score! >= s.threshold
+  const pass = p.qualified
   return (
     <div className="group flex flex-col">
       <PhotoCanvas
         url={p.url}
         thumbnailUrl={p.thumbnailUrl}
+        faceBox={p.assessmentFace}
+        imageSize={p.imageSize}
         alt={p.name}
         dim={!scored}
         className={`aspect-[4/5] sm:aspect-auto sm:h-[250px] ${isBase ? 'ring-2 ring-moss ring-offset-2 ring-offset-paper' : ''}`}
@@ -264,11 +272,13 @@ function Candidate({ p, rank, d, s, busy, onLock, dup }: { p: Photo; rank?: numb
               aria-expanded={open}
               className="mt-1.5 -ml-1 flex h-8 items-center gap-1 self-start rounded px-1 text-xs text-ink-2 hover:text-ink"
             >
-              评分原因
+              质量检查
               <Icon name="chevron" size={12} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
             </button>
             {open && (
               <ul className="mb-2 space-y-1.5 rounded-lg bg-well/70 p-2.5">
+                <li className="text-[11px] text-muted">OFIQ 总分独立计算；分项用于检查基线适用性。</li>
+                {p.qualityIssues.map(issue => <li key={issue} className="text-xs text-amber">{issue}</li>)}
                 {reasons(p).map((r) => (
                   <li key={r.label} className="flex justify-between gap-2 text-xs">
                     <span className="text-ink-2">{r.label}</span>
@@ -301,10 +311,10 @@ function Candidate({ p, rank, d, s, busy, onLock, dup }: { p: Photo; rank?: numb
           </>
         ) : (
           <>
-            <StatusText tone={p.status === 'incomplete' ? 'amber' : 'danger'}>{statusText[p.status]}</StatusText>
+            <StatusText tone={p.status === 'incomplete' || p.status === 'ok' ? 'amber' : 'danger'}>{p.status === 'ok' ? '待重新核对' : statusText[p.status]}</StatusText>
             <div className="mt-0.5 truncate text-xs text-muted">{p.name}</div>
             <div className="mt-1 text-xs text-muted">{p.status === 'incomplete' ? '下次扫描时自动重试' : '不能设为基线'}</div>
-            {p.error && <p className="mt-1 break-words text-xs text-amber">{p.error}</p>}
+            <p className="mt-1 break-words text-xs text-amber">{p.qualityIssues.join('；')}</p>
           </>
         )}
       </div>
@@ -334,7 +344,7 @@ function TopView({ d, s, busy, onLock }: { d: Derived; s: Settings; busy: boolea
               锁定照片
             </h3>
             <span className="text-[13px] text-muted">
-              排名第 {d.rankOf.get(d.locked.id)}，已不在 Top {s.k}；新照片得分更高，但锁定选择保持不变
+              {d.locked.eligible ? `排名第 ${d.rankOf.get(d.locked.id)}，不在 Top ${s.k}；锁定选择保持不变` : '锁定记录保留，该照片尚未通过单人复核；通过前不会作为当前基线'}
             </span>
           </div>
           <div className={grid}>
@@ -348,7 +358,7 @@ function TopView({ d, s, busy, onLock }: { d: Derived; s: Settings; busy: boolea
 
 function AllView({ person, d, s, busy, onLock, bad }: { person: Person; d: Derived; s: Settings; busy: boolean; onLock: (p: Photo) => void; bad: number }) {
   const [only, setOnly] = useState(false)
-  const rest = person.photos.filter((p) => !(p.status === 'ok' && p.score != null))
+  const rest = person.photos.filter((p) => !p.eligible)
   const list = only ? d.scored : [...d.scored, ...rest]
   return (
     <div>

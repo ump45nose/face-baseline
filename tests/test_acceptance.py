@@ -11,6 +11,7 @@ from backend.app import create_app, serialize_person
 from backend.images import decode, fingerprint
 from backend.service import BaselineService
 from backend.store import Store, now
+from backend.quality import MINIMUMS, assess
 
 
 class Engine:
@@ -25,7 +26,9 @@ class Engine:
             self.change = None
         n = image.getpixel((0, 0))[0]
         status = {1: 'no_face', 2: 'multi_face'}.get(n, 'ok')
-        return dict(status=status, score=n if status == 'ok' else None, metrics={}, error=None)
+        metrics = {name: dict(raw=100, scalar=90, code=0) for name, _, _ in MINIMUMS}
+        metrics.update(FaceValidation=dict(matched=True, box=[0, 0, 200, 200]), ImageSize=[40, 50])
+        return dict(status=status, score=n if status == 'ok' else None, metrics=metrics, error=None)
     def close(self):
         pass
 
@@ -62,7 +65,7 @@ def scan(service):
 def state(store, pid):
     with store.connect() as db:
         person = db.execute('SELECT * FROM people WHERE id=?', (pid,)).fetchone()
-    return serialize_person(store, person)
+    return serialize_person(store, person, Engine.version)
 
 
 def test_incremental_metadata_duplicates_rename(setup):
@@ -392,3 +395,83 @@ def test_legacy_migration_and_manual_restart(setup):
         assert state(migrated, pid) == old
     finally:
         restart.close()
+
+
+def test_quality_gates_precede_total_and_keep_manual_low_quality(setup):
+    directory, store, engine, service, pid = setup
+    image(directory, '高分模糊.png', 99)
+    image(directory, '清晰合格.png', 65)
+    scan(service)
+    with store.connect() as db:
+        high = db.execute('SELECT * FROM photos WHERE score=99').fetchone()
+        metrics = json.loads(high['metrics']); metrics['Sharpness']['scalar'] = 14
+        db.execute('UPDATE photos SET metrics=? WHERE id=?', (json.dumps(metrics), high['id']))
+    service.settings(dict(folders=[str(directory)], k=1, threshold=60))
+    p = state(store, pid)
+    baseline = next(x for x in p['photos'] if x['id'] == p['baselineId'])
+    assert baseline['score'] == 65 and baseline['qualified']
+    blurry = next(x for x in p['photos'] if x['score'] == 99)
+    assert blurry['eligible'] and not blurry['qualified'] and blurry['qualityIssues']
+    service.lock(pid, blurry['id'])
+    assert state(store, pid)['baselineId'] == blurry['id']
+    assert not next(x for x in state(store, pid)['photos'] if x['id'] == blurry['id'])['qualified']
+    service.unlock(pid)
+    assert state(store, pid)['baselineId'] == baseline['id']
+
+
+def test_engine_upgrade_invalidates_fast_path_and_preserves_history(setup, monkeypatch):
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 90)
+    scan(service)
+    original = state(store, pid)
+    photo_id = original['baselineId']
+    service.lock(pid, photo_id)
+    snapshot = store.data / f'snapshots/{pid}/v1.png'
+    before = snapshot.read_bytes()
+    monkeypatch.setattr(Engine, 'version', 'acceptance-fixture-v2')
+    service.upgrade_rules()
+    pending = state(store, pid)
+    assert pending['baselineId'] is None and pending['lockedPhotoId'] == photo_id
+    assert not pending['photos'][0]['eligible']
+    assert (directory / 'a.png').exists()
+    with pytest.raises(ValueError): service.lock(pid, photo_id)
+    assert scan(service)['scored'] == 1
+    reviewed = state(store, pid)
+    assert reviewed['baselineId'] == photo_id and reviewed['lockedPhotoId'] == photo_id
+    assert snapshot.read_bytes() == before
+    assert scan(service)['scored'] == 0
+
+
+def test_verified_single_face_required_and_missing_metrics_not_auto(setup):
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 95)
+    scan(service)
+    with store.connect() as db:
+        photo = db.execute('SELECT * FROM photos').fetchone()
+        metrics = json.loads(photo['metrics']); metrics.pop('InterEyeDistance')
+        db.execute('UPDATE photos SET metrics=? WHERE id=?', (json.dumps(metrics), photo['id']))
+    service.reconcile(pid, '人脸有效像素无法评估'); service.writeback.repair(pid)
+    assert state(store, pid)['baselineId'] is None
+    assert state(store, pid)['photos'][0]['eligible']
+    assert not state(store, pid)['photos'][0]['qualified']
+    metrics['FaceValidation']['matched'] = False
+    with store.connect() as db:
+        db.execute('UPDATE photos SET metrics=? WHERE id=?', (json.dumps(metrics), photo['id']))
+    service.reconcile(pid, '检测位置不一致'); service.writeback.repair(pid)
+    assert not state(store, pid)['photos'][0]['rank']
+    with pytest.raises(ValueError): service.lock(pid, photo['id'])
+
+
+def test_review_interrupted_before_ranking_is_recovered(setup):
+    directory, store, engine, service, pid = setup
+    service.upgrade_rules()
+    path = image(directory, 'a.png', 90)
+    person = service.discover()[0]
+    service.process(person, path, fingerprint(path), True, set())
+    assert state(store, pid)['baselineId'] is None
+    # Recreate the service after the photo commit, before the person ranking.
+    restart = BaselineService(store, engine, 0, [directory.parent])
+    restart.upgrade_rules()
+    assert state(store, pid)['baselineId'] is not None
+    assert engine.calls == 1
+    assert scan(restart)['scored'] == 0

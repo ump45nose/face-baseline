@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from .engine import OfiqEngine
 from .service import BaselineService, BusyError
 from .store import Store
+from .quality import assess
 
 
 class Settings(BaseModel):
@@ -27,7 +28,8 @@ class Scan(BaseModel):
     scope: str = 'all'
 
 
-def serialize_person(store, person):
+def serialize_person(store, person, engine_version=OfiqEngine.version):
+    settings = store.settings()
     with store.connect() as db:
         photos = db.execute('SELECT * FROM photos WHERE person_id=? AND present=1 ORDER BY added,id', (person['id'],)).fetchall()
         histories = db.execute('SELECT * FROM history WHERE person_id=? ORDER BY version DESC', (person['id'],)).fetchall()
@@ -37,6 +39,7 @@ def serialize_person(store, person):
                   version=person['version'], pendingOperations=ops, photos=[], history=[])
     for p in photos:
         metrics = json.loads(p['metrics'] or '{}')
+        quality = assess(p, settings['threshold'], engine_version)
         def scalar(name):
             item = metrics.get(name)
             return item['scalar'] if isinstance(item, dict) and item['code'] == 0 and item['scalar'] is not None and item['scalar'] >= 0 else None
@@ -48,6 +51,8 @@ def serialize_person(store, person):
                                     thumbnailUrl=f'/api/photos/{p["id"]}/thumbnail' if thumb.exists() and p['status'] != 'incomplete' else None,
                                     status=p['status'], score=p['score'], sub=subs if p['status'] == 'ok' else None,
                                     metrics=metrics, engine=p['engine'], error=p['error'],
+                                    eligible=quality['eligible'], qualified=quality['qualified'], qualityIssues=quality['issues'],
+                                    assessmentFace=metrics.get('FaceValidation', {}).get('box'), imageSize=metrics.get('ImageSize'),
                                     hash=p['hash'] or p['id'], addedAt=p['added'], rank=p['rank'], writeback=p['writeback']))
     for h in histories:
         available = h['snapshot'] and (store.data / h['snapshot']).is_file()
@@ -71,11 +76,12 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
         except OSError:
             pass  # Mount errors remain visible in health and scans; the settings page stays usable.
         service.start()
+        service.upgrade_rules()
         yield
         service.close()
         engine.close()
 
-    app = FastAPI(title='人脸基线', version='1.1.0', lifespan=lifespan)
+    app = FastAPI(title='人脸基线', version='1.2.0', lifespan=lifespan)
     app.state.service = service
 
     @app.exception_handler(ValueError)
@@ -107,7 +113,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
         with store.connect() as db:
             people = db.execute('SELECT * FROM people ORDER BY name,id').fetchall()
         return dict(settings=settings,
-                    people=[serialize_person(store, p) for p in people if p['directory'] in settings['folders']],
+                    people=[serialize_person(store, p, engine.version) for p in people if p['directory'] in settings['folders']],
                     jobs=store.jobs(), libraryAvailable=bool(settings['folders']) and all(Path(p).is_dir() for p in settings['folders']), engine=engine.version)
 
     @app.get('/api/folders')
@@ -124,7 +130,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
             p = db.execute('SELECT * FROM people WHERE id=?', (person_id,)).fetchone()
         if not p:
             raise HTTPException(404, '找不到该人物')
-        return serialize_person(store, p)
+        return serialize_person(store, p, engine.version)
 
     @app.get('/api/people/{person_id}/candidates')
     def candidates(person_id: str):

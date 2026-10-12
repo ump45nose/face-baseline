@@ -17,6 +17,7 @@ export function useScanAction() {
 }
 
 export function modeStatus(d: Derived): { tone: 'moss' | 'ink' | 'amber'; label: string } {
+  if (d.mode === 'locked' && !d.baseline) return { tone: 'amber', label: '锁定图待复核或不可用' }
   if (d.mode === 'locked') return d.reliable ? { tone: 'ink', label: '已锁定' } : { tone: 'amber', label: '已锁定 · 质量不足' }
   if (d.mode === 'auto') return { tone: 'moss', label: '自动选择' }
   return { tone: 'amber', label: '缺少可靠基线' }

@@ -7,6 +7,7 @@ from PIL import UnidentifiedImageError
 
 from .images import EXTENSIONS, decode, fingerprint, thumbnail
 from .store import now
+from .quality import POLICY_VERSION, assess
 from .writeback import Writeback
 
 
@@ -163,7 +164,7 @@ class BaselineService:
                     db.execute('UPDATE photos SET present=0 WHERE id=?', (photo_id,))
                 db.execute('UPDATE people SET last_scan=? WHERE id=?', (now(), person['id']))
             settings = self.store.settings()
-            rules = json.dumps([settings['k'], settings['threshold']])
+            rules = self.rules(settings)
             selection_incomplete = (person['locked_id'] and person['baseline_id'] != person['locked_id']) or (not person['locked_id'] and person['mode'] == 'locked')
             if affected or person['rules'] != rules or selection_incomplete:
                 self.reconcile(person['id'], '扫描后更新候选与基线')
@@ -191,6 +192,8 @@ class BaselineService:
                     db.execute("UPDATE photos SET person_id=?,rank=NULL,metadata=NULL WHERE id=?", (person['id'], photo_id))
                     db.execute("UPDATE operations SET status='superseded',error='照片已归入另一个所选目录' WHERE photo_id=? AND kind IN ('rename','metadata') AND status='pending'", (photo_id,))
                 db.execute('UPDATE photos SET path=?,present=1 WHERE id=?', (str(path), photo_id))
+                if ownership_changed or previous['path'] != str(path):
+                    db.execute('UPDATE people SET rules=NULL WHERE id=?', (person['id'],))
                 if previous['path'] != str(path) and not path.name.startswith('基线__'):
                     db.execute('UPDATE photos SET original_name=? WHERE id=?', (path.name, photo_id))
             else:
@@ -199,8 +202,9 @@ class BaselineService:
         if not stable:
             with self.store.connect() as db:
                 db.execute("UPDATE photos SET status='incomplete',score=NULL,error=? WHERE id=?", ('文件大小或修改时间仍在变化', photo_id))
+                db.execute('UPDATE people SET rules=NULL WHERE id=?', (person['id'],))
             return photo_id, 0, '文件未写完，下次重试', ownership_changed or not previous or previous['status'] != 'incomplete'
-        if previous and tuple(previous[k] for k in ('device', 'inode', 'size', 'mtime')) == st and previous['status'] not in ('incomplete', 'score_failed'):
+        if previous and previous['engine'] == self.engine.version and tuple(previous[k] for k in ('device', 'inode', 'size', 'mtime')) == st and previous['status'] not in ('incomplete', 'score_failed'):
             return photo_id, 0, None, ownership_changed or previous['path'] != str(path)
         result, scored, digest = None, 0, None
         try:
@@ -234,17 +238,31 @@ class BaselineService:
                 db.execute("UPDATE photos SET metadata=NULL,writeback='none' WHERE id=?", (photo_id,))
             db.execute('UPDATE photos SET device=?,inode=?,size=?,mtime=?,hash=?,status=?,score=?,metrics=?,engine=?,error=?,present=1 WHERE id=?',
                        (*st, digest, result['status'], result['score'], json.dumps(result['metrics']), self.engine.version, result.get('error'), photo_id))
+            changed = ownership_changed or not previous or previous['engine'] != self.engine.version or previous['hash'] != digest or previous['status'] != result['status'] or previous['path'] != str(path)
+            if changed:
+                db.execute('UPDATE people SET rules=NULL WHERE id=?', (person['id'],))
         warning = result.get('error') if result['status'] in ('incomplete', 'score_failed', 'decode_failed') else None
-        changed = ownership_changed or not previous or previous['hash'] != digest or previous['status'] != result['status'] or previous['path'] != str(path)
         return photo_id, scored, warning, changed
+
+    def rules(self, settings):
+        return json.dumps([settings['k'], settings['threshold'], self.engine.version, POLICY_VERSION])
+
+    def upgrade_rules(self):
+        settings = self.store.settings()
+        for person in self.discover():
+            if person['rules'] != self.rules(settings):
+                self.writeback.repair(person['id'])
+                self.reconcile(person['id'], '基线规则升级，重新核对可靠性')
+                self.writeback.repair(person['id'])
 
     def reconcile(self, person_id, reason):
         settings = self.store.settings()
         with self.store.connect() as db:
             person = db.execute('SELECT * FROM people WHERE id=?', (person_id,)).fetchone()
             photos = db.execute('SELECT * FROM photos WHERE person_id=? AND present=1 ORDER BY added,id', (person_id,)).fetchall()
-            scored = sorted((p for p in photos if p['status'] == 'ok' and p['score'] is not None),
-                            key=lambda p: (-p['score'], p['id'] != person['locked_id'], p['added'], p['id']))
+            quality = {p['id']: assess(p, settings['threshold'], self.engine.version) for p in photos}
+            scored = sorted((p for p in photos if quality[p['id']]['eligible']),
+                            key=lambda p: (not quality[p['id']]['qualified'], -p['score'], p['id'] != person['locked_id'], p['added'], p['id']))
             unique, hashes = [], set()
             for photo in scored:
                 if photo['hash'] not in hashes:
@@ -253,7 +271,7 @@ class BaselineService:
             top = unique[:settings['k']]
             ranks = {p['id']: i + 1 for i, p in enumerate(top)}
             locked = next((p for p in scored if p['id'] == person['locked_id']), None)
-            baseline = locked or next((p for p in top if p['score'] >= settings['threshold']), None)
+            baseline = locked or next((p for p in top if quality[p['id']]['qualified']), None)
             # A missing/invalid locked file does not silently select a different reference.
             if person['locked_id'] and not locked:
                 baseline = None
@@ -294,7 +312,7 @@ class BaselineService:
                 fields = dict(PhotoID=photo['id'], PersonID=person_id, OriginalName=original,
                               Score=str(photo['score']) if photo['score'] is not None else '',
                               Metrics=photo['metrics'] or '{}', EngineVersion=photo['engine'] or '',
-                              Qualified=str(photo['status'] == 'ok' and photo['score'] is not None and photo['score'] >= settings['threshold']),
+                              Qualified=str(quality[photo['id']]['qualified']),
                               CandidateRank=str(rank) if rank else '',
                               CurrentBaseline=str(photo['id'] == bid) if active else '',
                               Locked=str(photo['id'] == person['locked_id']) if active else '')
@@ -303,7 +321,7 @@ class BaselineService:
                 pending_fields = json.loads(pending_meta[0])['fields'] if pending_meta else None
                 if photo['hash'] and serialized != photo['metadata'] and fields != pending_fields:
                     self.writeback.record(db, person_id, photo['id'], 'metadata', {'hash': photo['hash'], 'fields': fields})
-            db.execute('UPDATE people SET rules=? WHERE id=?', (json.dumps([settings['k'], settings['threshold']]), person_id))
+            db.execute('UPDATE people SET rules=? WHERE id=?', (self.rules(settings), person_id))
 
     def mutate(self, fn):
         if not self.mutex.acquire(blocking=False):
@@ -320,8 +338,8 @@ class BaselineService:
             self.writeback.repair(person_id)
             with self.store.connect() as db:
                 photo = db.execute('SELECT * FROM photos WHERE id=? AND person_id=? AND present=1', (photo_id, person_id)).fetchone()
-                if not photo or photo['status'] != 'ok' or photo['score'] is None:
-                    raise ValueError('只能选择已成功评分的单人照片')
+                if not photo or not assess(photo, self.store.settings()['threshold'], self.engine.version)['eligible']:
+                    raise ValueError('只能选择通过新版单人复核并成功评分的照片')
                 if not Path(photo['path']).is_file() or decode(Path(photo['path']))[1] != photo['hash']:
                     raise ValueError('照片已变化或不可用，请重新扫描后选择')
                 db.execute('UPDATE people SET locked_id=? WHERE id=?', (photo_id, person_id))

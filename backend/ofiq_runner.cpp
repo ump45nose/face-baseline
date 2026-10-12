@@ -33,7 +33,13 @@ int main(int argc, char** argv) {
         auto status = engine->vectorQualityWithPreprocessingResults(image, qa, pre,
                             static_cast<uint32_t>(OFIQ::PreprocessingResultType::Faces));
         result << "{\"code\":" << static_cast<int>(status.code)
-               << ",\"faces\":" << pre.m_faces.size() << ",\"metrics\":{";
+               << ",\"faces\":" << pre.m_faces.size() << ",\"boxes\":[";
+        for (size_t i = 0; i < pre.m_faces.size(); ++i) {
+            const auto& b = pre.m_faces[i];
+            if (i) result << ',';
+            result << '[' << b.xleft << ',' << b.ytop << ',' << b.width << ',' << b.height << ']';
+        }
+        result << "],\"metrics\":{";
         bool first = true;
         for (auto const& [measure, value] : qa.qAssessments) {
             if (!first) result << ',';

@@ -1,4 +1,4 @@
-# 人脸基线扫描工具 v1
+# 人脸基线扫描工具 v1.2
 
 多选 NAS 文件夹，每个所选目录就是一个独立图库。使用固定 OFIQ 保留 Top K，自动挑选合格基线或保留手动锁定。
 现有 Figma Make 三页设计已接上 FastAPI、SQLite 和串行扫描 worker。
@@ -9,7 +9,7 @@ NAS 网页：`http://192.168.31.201:33081/`；本机 API：`http://127.0.0.1:330
 API 文档 `/docs`。网页提供文件夹多选器，目前浏览范围为 `/vol3/1000/Picture/YY/人物`，已选择该目录的全部子目录。每个选中目录单独作为一个图库，递归读取 JPG/JPEG/PNG。
 只在网页或 API 手动触发时扫描；没有定时扫描、实时监听或开机自动续扫。新增子目录不会自动选入。
 
-默认 K=5、合格门槛 60。Top K 可包含低分，自动基线须为合格单人照片。
+默认 K=5、总分门槛 60。Top K 优先保留通过基线质量检查的单人照片，再以 OFIQ 总分排序；不足 K 时可包含低质量单人照。自动基线须通过全部检查。
 无脸、多人、解码/评分失败的照片不可选。手动允许锁定低分单人照片，会提示质量不足。
 锁定图掉榜也继续保留；取消锁定立即自动选择。所有原文件保留。
 
@@ -20,7 +20,7 @@ Top K 和手选图使用专属 XMP-fb 字段记录身份、原名、OFIQ 原生/
 ## 扫描与恢复
 
 每次枚举文件，两次 size/mtime 检查相隔 10 秒。完整解码后按 RGB 像素 SHA256
-识别内容，评分缓存键为图像内容与固定引擎版本。同图只占一候选；相近连拍和角度
+识别内容，评分缓存键为图像内容与固定引擎、检测模型及预处理版本。版本不匹配会重新评估，旧缓存仍保留。同图只占一候选；相近连拍和角度
 多样性不属于 v1。改名利用文件身份保留 ID；元数据变化经像素散列确认，不重新评分。
 处理期间文件变化则不接受评分，下一次重试。
 
@@ -33,6 +33,16 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 
 基线选择或内容/锁定模式变化会记录新版本，快照保存在私有目录。v1 不接生图任务，
 不提供下游版本协议，也不实时监听或发送外部通知。
+
+## 基线质量复核
+
+全图使用固定 OpenCV Zoo YuNet 2023mar，在 640/1280 两个尺度检测并合并重复框。检测置信度 0.6，不能确认单人、检测到多人或两次检测位置不一致时均不能入选。通过全图复核后，临时裁切人脸及周边供 OFIQ 评分；原照片、缩略图和历史快照仍保存完整原图，不写入裁切内容。网页绿色框标明实际评分人脸。单人复核与目录命名不构成人物身份识别。
+
+自动基线的初始检查门槛：OFIQ 总分达到配置值、Sharpness ≥70、原始眼间距 ≥70px、人脸宽高 ≥120px、EyesVisible ≥80、EyesOpen ≥70、FaceOcclusionPrevention ≥80、Yaw/Pitch/Roll ≥80、IlluminationUniformity ≥50；任何必需指标无法评估也不自动选择。它们是本工具的初始适用性规则，须经实际图库继续校准。低质量单人照可手动锁定并显示具体原因；多人照不能通过锁定绕过复核。
+
+OFIQ UnifiedQualityScore 来自独立模型，分项用于检查适用性，不是总分的加权解释。升级规则时先撤下尚未复核的自动基线并恢复旧原名，保留锁定 ID、所有历史快照和评分缓存；重新扫描后通过新版单人复核的锁定图继续生效，不能通过的锁定记录仍保留但不作为当前基线。升级不会自行提交扫描；本次修复人工提交图库复核任务。
+
+YuNet 模型 SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`，来源固定 OpenCV Zoo 提交 `47534e27c9851bb1128ccc0102f1145e27f23f98`，MIT 许可随模型保存在 `/opt/ofiq/yunet/LICENSE`。API 照片字段包含 `eligible`、`qualified`、`qualityIssues`、`assessmentFace` 和 `imageSize`，网页与元数据使用同一后端资格判断。
 
 ## 目录与部署
 
@@ -53,12 +63,13 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 
 ```sh
 python3 scripts/prepare-engine.py /vol2/1000/Docker/face-baseline/engine
+python3 scripts/prepare-detector.py /vol2/1000/Docker/face-baseline/engine/yunet
 cd web
 npm ci
 npx tsc --noEmit
 npm run build
 cd ..
-docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.1.0 .
+docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.2.0 .
 docker compose -p utilities -f /vol2/1000/Docker/stacks/utilities/compose.yaml up -d --no-deps face-baseline
 ```
 

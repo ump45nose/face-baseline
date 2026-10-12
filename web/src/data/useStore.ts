@@ -6,6 +6,6 @@ export function useAppState() {
 }
 export function useActiveJob() {
   const s = useAppState()
-  return s.jobs.find((j) => j.status === 'queued' || j.status === 'running') ?? null
+  return s.jobs.find((j) => j.status === 'running') ?? s.jobs.find((j) => j.status === 'queued') ?? null
 }
 export const BUSY_REASON = '扫描进行中，为避免与文件写回冲突，完成后再操作'

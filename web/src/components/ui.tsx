@@ -80,6 +80,8 @@ export function PhotoCanvas({
   dim = false,
   zoomable = true,
   empty,
+  faceBox,
+  imageSize,
   children,
 }: {
   url: string | null
@@ -89,6 +91,8 @@ export function PhotoCanvas({
   dim?: boolean
   zoomable?: boolean
   empty?: { title: string; note?: string; tone?: 'amber' | 'neutral' }
+  faceBox?: number[] | null
+  imageSize?: [number, number] | null
   children?: ReactNode
 }) {
   const { zoom } = useUI()
@@ -116,6 +120,9 @@ export function PhotoCanvas({
       <span className="pointer-events-none absolute right-2 bottom-2 grid size-7 place-items-center rounded-md bg-white/90 text-ink-2 opacity-0 shadow-sm transition-opacity group-hover/canvas:opacity-100">
         <Icon name="zoom" size={14} />
       </span>
+      {faceBox && imageSize && <svg aria-label="实际评分人脸" viewBox={`0 0 ${imageSize[0]} ${imageSize[1]}`} preserveAspectRatio="xMidYMid meet" className="pointer-events-none absolute inset-0 size-full">
+        <rect x={faceBox[0]} y={faceBox[1]} width={faceBox[2]} height={faceBox[3]} fill="none" stroke="#2d5b47" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>}
       {children}
     </div>
   )

@@ -1,4 +1,4 @@
-export type PhotoStatus = 'ok' | 'no_face' | 'multi_face' | 'decode_failed' | 'score_failed' | 'incomplete'
+export type PhotoStatus = 'ok' | 'no_face' | 'multi_face' | 'face_mismatch' | 'decode_failed' | 'score_failed' | 'incomplete'
 export type WritebackState = 'ok' | 'failed' | 'none'
 
 export interface SubScores {
@@ -16,6 +16,12 @@ export interface Photo {
   thumbnailUrl: string | null
   metrics: Record<string, unknown>
   engine: string | null
+  eligible: boolean
+  qualified: boolean
+  qualityIssues: string[]
+  assessmentFace: number[] | null
+  imageSize: [number, number] | null
+  rank: number | null
   error: string | null
   url: string | null
   status: PhotoStatus

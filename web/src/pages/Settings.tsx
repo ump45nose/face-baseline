@@ -149,7 +149,8 @@ export default function SettingsPage() {
           <p className="px-4 py-3 text-xs text-muted sm:px-5">移除目录不会删除照片、评分和历史；重新选入可继续使用原档案。保存设置后不会自动扫描。</p>
         </Section>
 
-        <Section title="基线规则" desc="保存后重新计算候选与自动选择；手动锁定保持不变">
+        <Section title="基线规则" desc="合格单人照优先进入候选；自动基线须同时通过总分与质量检查">
+          <p className="px-4 py-4 text-xs leading-relaxed text-muted sm:px-5">单人照片先经全图检测与评分位置复核。自动选择要求：清晰度 ≥70、眼间距 ≥70px、人脸宽高 ≥120px、眼睛可见 ≥80、眼睛张开 ≥70、遮挡与三轴姿态 ≥80、光照均匀度 ≥50。低质量单人照片仍可手动锁定。</p>
           <FormRow label="候选数量 K" hint="每人保留 Top K，1–100">
             {input('k', 'sm:w-28 tabular-nums', { inputMode: 'numeric' })}
           </FormRow>
@@ -218,7 +219,7 @@ function JobRow({ j, canRetry, busy, onRetry }: { j: ScanJob; canRetry: boolean;
             </div>
           )}
           {j.log.map((l, i) => (
-            <p key={i} className={`text-xs leading-relaxed ${l.level === 'error' ? 'text-danger' : l.level === 'warn' ? 'text-amber' : 'text-ink-2'}`}>
+            <p key={i} className={`break-all text-xs leading-relaxed ${l.level === 'error' ? 'text-danger' : l.level === 'warn' ? 'text-amber' : 'text-ink-2'}`}>
               {l.text}
             </p>
           ))}
