@@ -6,6 +6,7 @@ import { Button, JobBadge, Progress, useUI } from '../components/ui'
 import Icon from '../components/icons'
 import { useScanAction } from './Overview'
 import type { ScanJob } from '../data/types'
+import FolderPicker from '../components/FolderPicker'
 
 function Section({ title, desc, action, children }: { title: string; desc?: string; action?: ReactNode; children: ReactNode }) {
   return (
@@ -39,29 +40,29 @@ export default function SettingsPage() {
   const job = useActiveJob()
   const scan = useScanAction()
   const { toast } = useUI()
-  const init = () => ({ root: state.settings.root, k: String(state.settings.k), threshold: String(state.settings.threshold) })
+  const init = () => ({ folders: [...state.settings.folders], k: String(state.settings.k), threshold: String(state.settings.threshold) })
   const [form, setForm] = useState(init)
+  const [picker, setPicker] = useState(false)
   useEffect(() => setForm(init()), [state.settings])
 
   const k = Number(form.k)
   const t = Number(form.threshold)
   const errs = {
-    root: !form.root.trim().startsWith('/') ? '请输入以 / 开头的绝对路径' : '',
     k: form.k === '' || !Number.isInteger(k) || k < 1 || k > 100 ? '需为 1–100 的整数' : '',
     threshold: form.threshold === '' || !Number.isInteger(t) || t < 0 || t > 100 ? '需为 0–100 的整数' : '',
   }
-  const dirty = form.root.trim() !== state.settings.root || k !== state.settings.k || t !== state.settings.threshold
-  const valid = !errs.root && !errs.k && !errs.threshold
+  const dirty = JSON.stringify(form.folders) !== JSON.stringify(state.settings.folders) || k !== state.settings.k || t !== state.settings.threshold
+  const valid = !errs.k && !errs.threshold
   const busy = !!job
   const last = state.jobs.find((j) => j.status !== 'queued' && j.status !== 'running')
   const latest = state.jobs[0]
 
   const save = async () => {
-    await api.saveSettings({ root: form.root.trim(), k, threshold: t })
-    toast('设置已保存，候选与自动选择已重新计算')
+    await api.saveSettings({ folders: form.folders, k, threshold: t })
+    toast('设置已保存')
   }
 
-  const input = (key: 'root' | 'k' | 'threshold', extra: string, props: object = {}) => (
+  const input = (key: 'k' | 'threshold', extra: string, props: object = {}) => (
     <div>
       <input
         value={form[key]}
@@ -120,25 +121,35 @@ export default function SettingsPage() {
                 </>
               )}
             </div>
-            <Button variant="primary" icon={job ? 'refresh' : 'scan'} onClick={() => scan('all')} className="w-full sm:w-auto">
-              {job ? '再次请求（将合并）' : last?.status === 'failed' || last?.status === 'partial' ? '立即重试扫描' : '扫描全部人物'}
+            <Button disabled={!state.settings.folders.length} variant="primary" icon={job ? 'refresh' : 'scan'} onClick={() => scan('all')} className="w-full sm:w-auto">
+              {job ? '再次请求（将合并）' : last?.status === 'failed' || last?.status === 'partial' ? '立即重试扫描' : '扫描所选图库'}
             </Button>
           </div>
-          <FormRow label="定时扫描" hint="由系统 cron 管理，不做实时监听">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px]">
-              <span className="flex items-center gap-1.5 font-medium">
-                <Icon name="clock" size={14} className="text-muted" />
-                每日 03:00
-              </span>
-              <span className="text-muted">Asia/Taipei</span>
-            </div>
-          </FormRow>
+
         </Section>
 
-        <Section title="基线规则" desc="保存后重新计算候选；更换根目录后请扫描建立新图库档案">
-          <FormRow label="图库根目录" hint="直接子目录即人物；递归扫描 JPG / JPEG / PNG">
-            {input('root', 'font-mono text-[13px]', { spellCheck: false })}
-          </FormRow>
+        <Section title="图库目录" desc="多选文件夹；每个选中的目录就是一个独立图库，递归读取其中的 JPG / JPEG / PNG">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-5">
+            <span className="text-sm text-ink-2">已选 {form.folders.length} 个目录</span>
+            <Button icon="folder" disabled={busy} onClick={() => setPicker(true)}>选择文件夹</Button>
+          </div>
+          <div className="max-h-72 divide-y divide-line overflow-y-auto">
+          {form.folders.map(folder => (
+            <div key={folder} className="flex items-center gap-3 px-4 py-3 sm:px-5">
+              <Icon name="folder" size={18} className="shrink-0 text-moss" />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">{folder.split('/').filter(Boolean).slice(-1)[0]}</div>
+                <div className="mt-0.5 break-all font-mono text-xs text-muted">{folder}</div>
+              </div>
+              <button aria-label={`移除 ${folder}`} disabled={busy} onClick={() => setForm({ ...form, folders: form.folders.filter(p => p !== folder) })} className="grid size-9 shrink-0 place-items-center rounded-lg text-muted hover:bg-well disabled:opacity-40"><Icon name="x" size={16} /></button>
+            </div>
+          ))}
+          </div>
+          {form.folders.length === 0 && <p className="px-5 py-5 text-sm text-muted">还没有选择目录。选择并保存后，可手动开始扫描。</p>}
+          <p className="px-4 py-3 text-xs text-muted sm:px-5">移除目录不会删除照片、评分和历史；重新选入可继续使用原档案。保存设置后不会自动扫描。</p>
+        </Section>
+
+        <Section title="基线规则" desc="保存后重新计算候选与自动选择；手动锁定保持不变">
           <FormRow label="候选数量 K" hint="每人保留 Top K，1–100">
             {input('k', 'sm:w-28 tabular-nums', { inputMode: 'numeric' })}
           </FormRow>
@@ -154,17 +165,18 @@ export default function SettingsPage() {
               </Button>
             )}
             <Button variant="primary" disabled={!dirty || !valid || busy} onClick={save}>
-              保存并重新计算
+              保存设置
             </Button>
           </div>
         </Section>
 
-        <Section title="运行记录" desc="最近的定时与手动扫描">
+        <Section title="运行记录" desc="最近的手动扫描及保留的历史记录">
           {state.jobs.map((j) => (
             <JobRow key={j.id} j={j} canRetry={j === latest && (j.status === 'failed' || j.status === 'partial')} busy={busy} onRetry={() => scan(j.scope)} />
           ))}
         </Section>
       </div>
+      {picker && <FolderPicker value={form.folders} onApply={folders => setForm({ ...form, folders })} onClose={() => setPicker(false)} />}
     </div>
   )
 }
@@ -184,7 +196,7 @@ function JobRow({ j, canRetry, busy, onRetry }: { j: ScanJob; canRetry: boolean;
             {j.scopeLabel}
             <span className="text-muted">
               {' '}
-              · {j.trigger === 'cron' ? '定时' : '手动'}
+              · {j.trigger === 'cron' ? '历史' : '手动'}
               {j.merged > 0 && ` · 合并 ${j.merged} 次`}
               {issues > 0 && ` · ${issues} 条提示`}
             </span>

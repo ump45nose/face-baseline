@@ -1,7 +1,6 @@
 import json
 import shutil
 import subprocess
-import threading
 import struct
 from pathlib import Path
 
@@ -37,9 +36,9 @@ def setup(tmp_path):
     (root / '甲').mkdir(parents=True)
     store = Store(tmp_path / 'data')
     with store.connect() as db:
-        db.execute('UPDATE settings SET value=?', (json.dumps(dict(root=str(root), k=5, threshold=60)),))
+        db.execute('UPDATE settings SET value=?', (json.dumps(dict(folders=[str(root / "甲")], k=5, threshold=60)),))
     engine = Engine()
-    service = BaselineService(store, engine, 0)
+    service = BaselineService(store, engine, 0, [root])
     person = service.discover()[0]
     return root / '甲', store, engine, service, person['id']
 
@@ -204,11 +203,11 @@ def test_rename_crash_and_queue_merge(setup, monkeypatch):
 def test_api_validation_and_mutex(setup):
     from fastapi.testclient import TestClient
     directory, store, engine, service, pid = setup
-    app = create_app(store.data, engine=engine, stable_seconds=0)
+    app = create_app(store.data, engine=engine, stable_seconds=0, browse_roots=[directory.parent])
     # No lifespan: test the HTTP boundary with the worker stopped.
     with TestClient(app) as client:
         assert client.get('/healthz').status_code == 200
-        assert client.put('/api/settings', json=dict(root=str(directory.parent), k=0, threshold=60)).status_code == 422
+        assert client.put('/api/settings', json=dict(folders=[str(directory)], k=0, threshold=60)).status_code == 422
         assert client.post('/api/scans', headers={'Origin': 'https://unrelated.example'}, json={}).status_code == 403
         assert client.post(f'/api/people/{pid}/lock', json={'photoId': 'invalid'}).status_code == 400
         lock = app.state.service.mutex
@@ -250,14 +249,13 @@ def test_two_observations_detect_partial_write(setup, monkeypatch):
     directory, store, engine, service, pid = setup
     path = image(directory, '写入中.png', 90)
     service.stable_seconds = 0.15
-    import time
-    sleep = time.sleep
+    wait = service.stop.wait
     def write_during_observation_gap(seconds):
         image(directory, path.name, 85)
-        sleep(seconds)
-    monkeypatch.setattr('backend.service.time.sleep', write_during_observation_gap)
+        return wait(seconds)
+    monkeypatch.setattr(service.stop, 'wait', write_during_observation_gap)
     scan(service)
-    monkeypatch.setattr('backend.service.time.sleep', sleep)
+    monkeypatch.setattr(service.stop, 'wait', wait)
     assert engine.calls == 0
     assert state(store, pid)['photos'][0]['status'] == 'incomplete'
     assert scan(service)['scored'] == 1
@@ -300,3 +298,97 @@ def test_locking_identical_copy_keeps_one_candidate(setup):
     assert p['baselineId'] == copy['id']
     assert len([ph for ph in p['photos'] if ph['rank']]) == 1
     assert next(ph for ph in p['photos'] if ph['id'] == copy['id'])['rank'] == 1
+
+
+def test_explicit_folders_recursion_and_unselected_siblings(setup):
+    directory, store, engine, service, pid = setup
+    root = directory.parent
+    sibling = root / '不选入'; sibling.mkdir()
+    image(sibling, 'skip.png', 99)
+    nested = directory / '子目录'; nested.mkdir()
+    image(nested, 'inside.png', 80)
+    new_folder = root / '新出现'; new_folder.mkdir()
+    image(new_folder, 'skip.png', 90)
+    assert scan(service)['scored'] == 1
+    assert len(service.discover()) == 1
+    assert state(store, pid)['photos'][0]['name'] == 'inside.png'
+    with store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM people').fetchone()[0] == 1
+
+
+def test_multiselect_same_names_and_preserve_removed_archive(setup):
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 90)
+    scan(service)
+    photo = state(store, pid)['photos'][0]
+    service.lock(pid, photo['id'])
+    original = state(store, pid)
+    other_parent = directory.parent / '另一个位置'; other_parent.mkdir()
+    other = other_parent / directory.name; other.mkdir()
+    image(other, 'b.png', 85)
+    service.settings(dict(folders=[str(directory), str(other)], k=5, threshold=60))
+    assert len(service.discover()) == 2
+    assert scan(service)['scored'] == 1
+    service.settings(dict(folders=[str(other)], k=5, threshold=60))
+    assert state(store, pid)['lockedPhotoId'] == original['lockedPhotoId']
+    assert state(store, pid)['history'] == original['history']
+    with pytest.raises(ValueError): service.submit(pid)
+    service.settings(dict(folders=[str(directory), str(other)], k=5, threshold=60))
+    assert service.discover()[0]['id'] == pid
+    assert scan(service)['scored'] == 0
+    assert state(store, pid)['lockedPhotoId'] == photo['id']
+
+
+def test_folder_browse_and_overlapping_selection(setup):
+    directory, store, engine, service, pid = setup
+    root = directory.parent
+    assert service.browse()['directories'][0]['path'] == str(root)
+    assert service.browse(str(root))['directories'][0]['path'] == str(directory)
+    with pytest.raises(ValueError): service.browse(str(root.parent))
+    with pytest.raises(ValueError): service.settings(dict(folders=[str(root), str(directory)], k=5, threshold=60))
+    with pytest.raises(ValueError): service.settings(dict(folders=[str(directory), str(directory)], k=5, threshold=60))
+    service.settings(dict(folders=[], k=5, threshold=60))
+    assert service.discover() == []
+    with pytest.raises(ValueError): service.submit()
+
+
+def test_selected_nested_folder_reuses_score_and_photo_identity(setup):
+    directory, store, engine, service, pid = setup
+    nested = directory / 'nested'; nested.mkdir()
+    image(nested, 'a.png', 90)
+    scan(service)
+    old = state(store, pid)
+    photo_id = old['photos'][0]['id']
+    service.settings(dict(folders=[str(nested)], k=5, threshold=60))
+    nested_id = service.discover()[0]['id']
+    assert scan(service)['scored'] == 0
+    assert state(store, nested_id)['photos'][0]['id'] == photo_id
+    assert state(store, pid)['history'] == old['history']
+    service.settings(dict(folders=[str(directory)], k=5, threshold=60))
+    assert service.discover()[0]['id'] == pid
+    assert scan(service)['scored'] == 0
+
+
+def test_legacy_migration_and_manual_restart(setup):
+    import time
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 90)
+    scan(service)
+    old = state(store, pid)
+    with store.connect() as db:
+        db.execute('UPDATE settings SET value=?', (json.dumps(dict(root=str(directory.parent), k=5, threshold=60)),))
+    migrated = Store(store.data)
+    assert migrated.settings() == dict(folders=[str(directory)], k=5, threshold=60)
+    assert state(migrated, pid) == old
+    queued = service.submit()['job']
+    restart = BaselineService(migrated, engine, 0, [directory.parent])
+    calls = engine.calls
+    restart.start()
+    try:
+        time.sleep(0.05)
+        assert engine.calls == calls
+        interrupted = next(j for j in migrated.jobs() if j['id'] == queued['id'])
+        assert interrupted['status'] == 'failed'
+        assert state(migrated, pid) == old
+    finally:
+        restart.close()

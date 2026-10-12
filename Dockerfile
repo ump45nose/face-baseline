@@ -22,4 +22,4 @@ ENV PATH=/opt/venv/bin:$PATH LD_LIBRARY_PATH=/opt/ofiq/lib PYTHONDONTWRITEBYTECO
 WORKDIR /app
 USER 1000:1001
 EXPOSE 8080
-CMD ["uvicorn", "backend.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["uvicorn", "backend.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log"]

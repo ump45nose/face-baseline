@@ -1,8 +1,8 @@
-import type { AppState, ScanJob, Settings } from './types'
+import type { AppState, FolderListing, ScanJob, Settings } from './types'
 
 class HttpBaselineApi {
   private state: AppState = {
-    settings: { root: '/vol3/1000/Picture/YY/人物', k: 5, threshold: 60 },
+    settings: { folders: [], k: 5, threshold: 60 },
     people: [], jobs: [], loaded: false, error: null, libraryAvailable: false, engine: '',
   }
   private subs = new Set<() => void>()
@@ -51,6 +51,9 @@ class HttpBaselineApi {
   async saveSettings(settings: Settings) {
     await this.request('/settings', 'PUT', settings)
     await this.refresh()
+  }
+  async browseFolders(path?: string): Promise<FolderListing> {
+    return this.request('/folders' + (path ? '?path=' + encodeURIComponent(path) : ''))
   }
   async startScan(scope: 'all' | string): Promise<{ merged: boolean; job: ScanJob }> {
     const result = await this.request('/scans', 'POST', { scope })

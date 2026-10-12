@@ -96,10 +96,10 @@ function Shell() {
           <div className="rounded-lg px-2 py-1.5">
             <div className="flex items-center gap-1.5 text-xs text-ink-2">
               <span className="size-1.5 rounded-full bg-moss" />
-              {state.libraryAvailable ? '图库已连接' : '图库不可用'}
+              {state.settings.folders.length === 0 ? '尚未选择图库' : state.libraryAvailable ? '图库已连接' : '有目录不可用'}
             </div>
-            <div className="mt-1 truncate text-[11px] text-muted" title={state.settings.root}>
-              {state.settings.root}
+            <div className="mt-1 truncate text-[11px] text-muted" title={state.settings.folders.join('\n')}>
+              {state.settings.folders.length} 个已选目录
             </div>
           </div>
 

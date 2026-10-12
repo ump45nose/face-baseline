@@ -41,6 +41,8 @@ export interface HistoryEntry {
 export interface Person {
   id: string
   name: string
+  directory: string
+  available: boolean
   photos: Photo[]
   lockedPhotoId: string | null
   baselineId: string | null
@@ -51,9 +53,15 @@ export interface Person {
 }
 
 export interface Settings {
-  root: string
+  folders: string[]
   k: number
   threshold: number
+}
+
+export interface FolderListing {
+  path: string | null
+  parent: string | null
+  directories: { path: string; name: string; available: boolean }[]
 }
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'partial' | 'failed'

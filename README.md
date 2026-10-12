@@ -1,13 +1,13 @@
 # 人脸基线扫描工具 v1
 
-用固定 OFIQ 评分图库，按人物保留 Top K，自动挑选合格基线或保留手动锁定。
+多选 NAS 文件夹，每个所选目录就是一个独立图库。使用固定 OFIQ 保留 Top K，自动挑选合格基线或保留手动锁定。
 现有 Figma Make 三页设计已接上 FastAPI、SQLite 和串行扫描 worker。
 
 ## 使用
 
 NAS 网页：`http://192.168.31.201:33081/`；本机 API：`http://127.0.0.1:33081/api`。
-API 文档 `/docs`。默认图库 `/vol3/1000/Picture/YY/人物`，直接子目录为人物，
-递归读取 JPG/JPEG/PNG。每天 03:00 Asia/Taipei 由 cron 提交任务；也可网页扫描全部或单人。
+API 文档 `/docs`。网页提供文件夹多选器，目前浏览范围为 `/vol3/1000/Picture/YY/人物`，已选择该目录的全部子目录。每个选中目录单独作为一个图库，递归读取 JPG/JPEG/PNG。
+只在网页或 API 手动触发时扫描；没有定时扫描、实时监听或开机自动续扫。新增子目录不会自动选入。
 
 默认 K=5、合格门槛 60。Top K 可包含低分，自动基线须为合格单人照片。
 无脸、多人、解码/评分失败的照片不可选。手动允许锁定低分单人照片，会提示质量不足。
@@ -29,7 +29,7 @@ SQLite 保存人员、文件档案、任务、基线版本和文件操作日志�
 继续修复。元数据先在同目录临时副本写入并核对像素和源文件状态，再替换。
 Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 服务只运行一个 Uvicorn worker；扫描、锁定、取消锁定和写回共用互斥锁。
-重复扫描合并；不同范围在已有单人扫描运行时排队，串行执行。服务中断后续跑档案。
+重复扫描合并；不同范围在已有单人扫描运行时排队，串行执行。服务中断后保留档案与未完成操作；下一次手动扫描继续处理。
 
 基线选择或内容/锁定模式变化会记录新版本，快照保存在私有目录。v1 不接生图任务，
 不提供下游版本协议，也不实时监听或发送外部通知。
@@ -41,7 +41,7 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 - 正式 Compose `/vol2/1000/Docker/stacks/utilities/compose.yaml`，沿用 `tool_net`。
 - 私有运行目录 `/vol2/1000/Docker/face-baseline/data`：SQLite、缩略图、历史快照。
 - 固定引擎下载/构建材料 `/vol2/1000/Docker/face-baseline/engine`，不进入源码仓库。
-- cron 包装源码在 `nas-cron-jobs/face-baseline`，部署脚本在 `/home/yuwk/cron/scripts`。
+- 旧 cron 入口和包装已移除；原运行记录保留。
 
 固定官方 eu-LISA 包含 OFIQ **1.0.3** 和模型；包 SHA256
 `c8996f37246731d7bd195697da04542b97cdf4e34a5d43ea1ab6a3138c4620ce`。
@@ -58,12 +58,13 @@ npm ci
 npx tsc --noEmit
 npm run build
 cd ..
-docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.0.0 .
+docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.1.0 .
 docker compose -p utilities -f /vol2/1000/Docker/stacks/utilities/compose.yaml up -d --no-deps face-baseline
 ```
 
-图库挂载使用相同宿主/容器路径。网页更换根目录必须指向实际可见的挂载目录；新增
-其他媒体挂载只修改此服务。容器身份 1000:1001、只读根文件系统，数据和图库可写。
+图库挂载使用相同宿主/容器路径。图库设置保存 `folders` 数组。文件夹多选支持不同层级及多个已挂载位置；父子目录不能同时选入，避免重复归类。
+更换所选目录不删除档案；重新选择同一路径保留人物/照片 ID、锁定和历史。旧版单一 `root` 自动迁移为原有目录列表。
+需要增加可选位置时，仅修改此服务的媒体挂载和 `FACE_BASELINE_LIBRARY_BASES`（JSON 路径数组），保持宿主/容器路径一致。容器身份 1000:1001、只读根文件系统，数据和图库可写。
 端口仅绑定 NAS 局域网和 loopback；没有新增公网或 Tailnet 入口。
 
 本地开发：Python venv 安装 `requirements.txt`，`FACE_BASELINE_DATA` 指定私有目录，
@@ -73,5 +74,5 @@ docker compose -p utilities -f /vol2/1000/Docker/stacks/utilities/compose.yaml u
 ## 验收
 
 `python -m pytest tests -q` 在临时图库使用可控评分夹具和真实 ExifTool 验证业务规则，
-不把夹具分数用于正式服务。部署验收另外执行真实 OFIQ 单人/无脸/多人评分、真实
-图库单人扫描和增量重扫，以及网页桌面/窄屏检查。验收结果见 `VALIDATION.md`。
+不把夹具分数用于正式服务。部署验收覆盖旧图库迁移、只扫描所选目录、文件夹多选和保存，以及桌面/窄屏检查。
+既有真实 OFIQ 单人/无脸/多人评分、真实单人扫描与增量重扫已验证。验收结果见 `VALIDATION.md`。

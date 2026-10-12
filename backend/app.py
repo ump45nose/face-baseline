@@ -14,7 +14,7 @@ from .store import Store
 
 
 class Settings(BaseModel):
-    root: str
+    folders: list[str]
     k: int = Field(ge=1, le=100)
     threshold: int = Field(ge=0, le=100)
 
@@ -25,7 +25,6 @@ class Lock(BaseModel):
 
 class Scan(BaseModel):
     scope: str = 'all'
-    trigger: str = Field(default='manual', pattern='^(manual|cron)$')
 
 
 def serialize_person(store, person):
@@ -33,7 +32,7 @@ def serialize_person(store, person):
         photos = db.execute('SELECT * FROM photos WHERE person_id=? AND present=1 ORDER BY added,id', (person['id'],)).fetchall()
         histories = db.execute('SELECT * FROM history WHERE person_id=? ORDER BY version DESC', (person['id'],)).fetchall()
         ops = [dict(r) for r in db.execute("SELECT id,kind,photo_id,error FROM operations WHERE person_id=? AND status='pending'", (person['id'],))]
-    result = dict(id=person['id'], name=person['name'], lockedPhotoId=person['locked_id'],
+    result = dict(id=person['id'], name=person['name'], directory=person['directory'], available=Path(person['directory']).is_dir(), lockedPhotoId=person['locked_id'],
                   baselineId=person['baseline_id'], mode=person['mode'], lastScan=person['last_scan'],
                   version=person['version'], pendingOperations=ops, photos=[], history=[])
     for p in photos:
@@ -59,10 +58,11 @@ def serialize_person(store, person):
     return result
 
 
-def create_app(data=None, engine=None, stable_seconds=10, web=None):
+def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots=None):
     store = Store(Path(data or os.environ.get('FACE_BASELINE_DATA', '/data')))
     engine = engine or OfiqEngine()
-    service = BaselineService(store, engine, stable_seconds)
+    roots = browse_roots or json.loads(os.environ.get('FACE_BASELINE_LIBRARY_BASES', '["/vol3/1000/Picture/YY/人物"]'))
+    service = BaselineService(store, engine, stable_seconds, roots)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -75,7 +75,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None):
         service.close()
         engine.close()
 
-    app = FastAPI(title='人脸基线', version='1.0.0', lifespan=lifespan)
+    app = FastAPI(title='人脸基线', version='1.1.0', lifespan=lifespan)
     app.state.service = service
 
     @app.exception_handler(ValueError)
@@ -98,8 +98,8 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None):
 
     @app.get('/healthz')
     def health():
-        root = Path(store.settings()['root'])
-        return {'status': 'ok', 'libraryAvailable': root.is_dir(), 'engine': engine.version}
+        folders = store.settings()['folders']
+        return {'status': 'ok', 'libraryAvailable': bool(folders) and all(Path(p).is_dir() for p in folders), 'engine': engine.version}
 
     @app.get('/api/state')
     def state():
@@ -107,8 +107,12 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None):
         with store.connect() as db:
             people = db.execute('SELECT * FROM people ORDER BY name,id').fetchall()
         return dict(settings=settings,
-                    people=[serialize_person(store, p) for p in people if Path(p['directory']).parent == Path(settings['root'])],
-                    jobs=store.jobs(), libraryAvailable=Path(settings['root']).is_dir(), engine=engine.version)
+                    people=[serialize_person(store, p) for p in people if p['directory'] in settings['folders']],
+                    jobs=store.jobs(), libraryAvailable=bool(settings['folders']) and all(Path(p).is_dir() for p in settings['folders']), engine=engine.version)
+
+    @app.get('/api/folders')
+    def folders(path: str | None = None):
+        return service.browse(path)
 
     @app.get('/api/people')
     def people():
@@ -149,7 +153,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None):
 
     @app.post('/api/scans', status_code=202)
     def scan(body: Scan):
-        return service.submit(body.scope, body.trigger)
+        return service.submit(body.scope)
 
     @app.get('/api/scans')
     def scans():

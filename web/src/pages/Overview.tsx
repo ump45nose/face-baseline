@@ -69,9 +69,12 @@ export default function Overview() {
           <h1 className="text-[26px] font-semibold tracking-tight sm:text-[28px]">人物图库</h1>
           <p className="mt-1 text-sm text-ink-2">从每个人的照片中，找到清晰可靠的参考</p>
         </div>
-        <Button variant="primary" icon={job ? 'refresh' : 'scan'} onClick={() => scan('all')} className="w-full sm:w-auto">
-          {job ? (job.status === 'queued' ? '等待开始…' : `扫描中 ${job.processed}/${job.total}`) : '扫描全部人物'}
-        </Button>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <a href="#/settings" className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-card px-3.5 text-sm font-medium ring-1 ring-line-2 sm:h-9"><Icon name="folder" size={16} />选择文件夹</a>
+          <Button disabled={!state.settings.folders.length} variant="primary" icon={job ? 'refresh' : 'scan'} onClick={() => scan('all')} className="w-full sm:w-auto">
+            {job ? (job.status === 'queued' ? '等待开始…' : `扫描中 ${job.processed}/${job.total}`) : '扫描所选图库'}
+          </Button>
+        </div>
       </header>
 
       {/* 紧凑摘要 */}
@@ -134,13 +137,11 @@ export default function Overview() {
       {shown.length === 0 ? (
         <div className="mt-10 flex flex-col items-center rounded-xl border border-dashed border-line-2 px-6 py-20 text-center">
           <Icon name="person" size={28} className="text-line-2" />
-          <div className="mt-3 text-[15px] font-medium">没有符合条件的人物</div>
+          <div className="mt-3 text-[15px] font-medium">{state.settings.folders.length ? '没有符合条件的人物' : '请先选择图库目录'}</div>
           <p className="mt-1 max-w-sm text-[13px] text-muted">
-            {q.trim() ? `未找到名称包含“${q.trim()}”的人物。` : '当前筛选下暂无人物。'}人物来自根目录下的直接子目录。
+            {state.settings.folders.length === 0 ? '选择一个或多个文件夹，再手动扫描其中的照片。' : q.trim() ? `未找到名称包含“${q.trim()}”的人物。` : '当前筛选下暂无人物。每个已选文件夹单独作为一个图库。'}
           </p>
-          <Button className="mt-5" size="sm" onClick={() => (setQ(''), setF('all'))}>
-            清除筛选
-          </Button>
+          {state.settings.folders.length ? <Button className="mt-5" size="sm" onClick={() => (setQ(''), setF('all'))}>清除筛选</Button> : <a href="#/settings" className="mt-5 text-sm font-medium text-moss">选择文件夹</a>}
         </div>
       ) : (
         <div className="mt-6 grid grid-cols-2 gap-x-3 gap-y-6 sm:gap-x-5 sm:gap-y-8 md:grid-cols-3 xl:grid-cols-4">
@@ -174,6 +175,7 @@ function PersonCard({ person, settings }: { person: Person; settings: Settings }
         )}
       </PhotoCanvas>
       <div className="mt-2.5 px-0.5">
+        <div className="mb-1 truncate text-[11px] text-muted" title={person.directory}>{person.directory}</div>
         <div className="flex items-baseline justify-between gap-2">
           <span className="truncate text-[15px] font-medium group-hover:text-moss">{person.name}</span>
           {b && <span className={`text-[15px] font-semibold tabular-nums ${d.reliable ? 'text-ink' : 'text-amber'}`}>{b.score}</span>}

@@ -1,6 +1,5 @@
 import json
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -20,7 +19,7 @@ class BusyError(RuntimeError):
 
 
 class BaselineService:
-    def __init__(self, store, engine, stable_seconds=10):
+    def __init__(self, store, engine, stable_seconds=10, browse_roots=None):
         self.store, self.engine = store, engine
         self.stable_seconds = stable_seconds
         self.mutex = threading.Lock()
@@ -29,10 +28,10 @@ class BaselineService:
         self.stop = threading.Event()
         self.writeback = Writeback(store)
         self.thread = None
+        self.browse_roots = [Path(p).resolve() for p in (browse_roots or ['/vol3/1000/Picture/YY/人物'])]
 
     def discover(self):
-        root = Path(self.store.settings()['root'])
-        directories = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith('.'))
+        directories = [Path(p) for p in self.store.settings()['folders']]
         with self.store.connect() as db:
             for path in directories:
                 db.execute('INSERT OR IGNORE INTO people(id,directory,name) VALUES(?,?,?)',
@@ -40,15 +39,14 @@ class BaselineService:
             return [dict(db.execute('SELECT * FROM people WHERE directory=?', (str(p),)).fetchone()) for p in directories]
 
     def start(self):
-        # A process interruption keeps the task identity and restarts its enumeration.
+        # Scanning is manual: preserve interrupted results without restarting a job.
         for job in self.store.jobs():
-            if job['status'] == 'running':
-                job.update(status='queued', processed=0, scored=0)
-                job['log'].append({'level': 'warn', 'text': '服务曾中断，本次从文件档案继续扫描'})
+            if job['status'] in ('running', 'queued'):
+                job.update(status='failed', finishedAt=now())
+                job['log'].append({'level': 'warn', 'text': '扫描已中断，已有结果保留；请手动扫描继续'})
                 self.store.job(job)
         self.thread = threading.Thread(target=self.worker, name='scan-worker', daemon=True)
         self.thread.start()
-        self.wake.set()
 
     def close(self):
         self.stop.set()
@@ -56,22 +54,24 @@ class BaselineService:
         if self.thread:
             self.thread.join(timeout=5)
 
-    def submit(self, scope='all', trigger='manual'):
+    def submit(self, scope='all'):
         with self.jobs_mutex:
+            selected = self.discover()
+            if not selected:
+                raise ValueError('请先选择至少一个图库目录')
+            person = next((p for p in selected if p['id'] == scope), None)
+            if scope != 'all' and not person:
+                raise ValueError('该目录未选入图库')
             active = [j for j in self.store.jobs() if j['status'] in ('queued', 'running')]
             for job in active:
                 if job['scope'] == 'all' or job['scope'] == scope or job['status'] == 'queued':
                     if job['status'] == 'queued' and job['scope'] != scope:
-                        job.update(scope='all', scopeLabel='全部人物')
+                        job.update(scope='all', scopeLabel='所选图库')
                     job['merged'] += 1
                     self.store.job(job)
                     return {'merged': True, 'job': job}
-            with self.store.connect() as db:
-                person = db.execute('SELECT name FROM people WHERE id=?', (scope,)).fetchone()
-            if scope != 'all' and not person:
-                raise ValueError('找不到该人物')
-            job = dict(id=uid(), scope=scope, scopeLabel='全部人物' if scope == 'all' else person['name'],
-                       trigger=trigger, status='queued', processed=0, total=0, startedAt=now(),
+            job = dict(id=uid(), scope=scope, scopeLabel='所选图库' if scope == 'all' else person['name'],
+                       trigger='manual', status='queued', processed=0, total=0, startedAt=now(),
                        finishedAt=None, merged=0, scored=0, fileProcessed=0, fileTotal=0, log=[])
             self.store.job(job)
             self.wake.set()
@@ -110,9 +110,13 @@ class BaselineService:
         job['total'] = len(people)
         self.save_job(job)
         # Recover file writes before enumeration, including rename interrupted after fs commit.
-        self.writeback.repair()
+        for person in people:
+            self.writeback.repair(person['id'])
         first, paths = {}, {}
         for person in people:
+            directory = Path(person['directory'])
+            if not directory.is_dir():
+                raise ValueError(f'图库目录不可用：{directory}')
             paths[person['id']] = []
             for path in sorted(Path(person['directory']).rglob('*')):
                 if path.suffix.lower() not in EXTENSIONS or path.is_symlink() or any(part.startswith('.') for part in path.relative_to(person['directory']).parts):
@@ -128,12 +132,15 @@ class BaselineService:
         job['fileTotal'] = sum(len(items) for items in paths.values())
         self.save_job(job)
         if first:
-            time.sleep(self.stable_seconds)
+            if self.stop.wait(self.stable_seconds):
+                raise RuntimeError('扫描已中断，已有结果保留')
         partial = False
         for person in people:
             seen = set()
             affected = False
             for path in paths[person['id']]:
+                if self.stop.is_set():
+                    raise RuntimeError('扫描已中断，已有结果保留')
                 try:
                     st = fingerprint(path)
                 except FileNotFoundError:
@@ -170,6 +177,7 @@ class BaselineService:
         job['log'].insert(0, {'level': 'info', 'text': f'扫描 {job["total"]} 位人物，本次评分 {job["scored"]} 张；未变化图像已跳过'})
 
     def process(self, person, path, st, stable, seen):
+        ownership_changed = False
         with self.store.connect() as db:
             previous = db.execute('SELECT * FROM photos WHERE path=?', (str(path),)).fetchone()
             if not previous:
@@ -178,6 +186,10 @@ class BaselineService:
                 previous = next((p for p in matches if p['id'] not in seen and not Path(p['path']).exists()), None)
             photo_id = previous['id'] if previous else uid()
             if previous:
+                ownership_changed = previous['person_id'] != person['id']
+                if ownership_changed:
+                    db.execute("UPDATE photos SET person_id=?,rank=NULL,metadata=NULL WHERE id=?", (person['id'], photo_id))
+                    db.execute("UPDATE operations SET status='superseded',error='照片已归入另一个所选目录' WHERE photo_id=? AND kind IN ('rename','metadata') AND status='pending'", (photo_id,))
                 db.execute('UPDATE photos SET path=?,present=1 WHERE id=?', (str(path), photo_id))
                 if previous['path'] != str(path) and not path.name.startswith('基线__'):
                     db.execute('UPDATE photos SET original_name=? WHERE id=?', (path.name, photo_id))
@@ -187,9 +199,9 @@ class BaselineService:
         if not stable:
             with self.store.connect() as db:
                 db.execute("UPDATE photos SET status='incomplete',score=NULL,error=? WHERE id=?", ('文件大小或修改时间仍在变化', photo_id))
-            return photo_id, 0, '文件未写完，下次重试', not previous or previous['status'] != 'incomplete'
+            return photo_id, 0, '文件未写完，下次重试', ownership_changed or not previous or previous['status'] != 'incomplete'
         if previous and tuple(previous[k] for k in ('device', 'inode', 'size', 'mtime')) == st and previous['status'] not in ('incomplete', 'score_failed'):
-            return photo_id, 0, None, previous['path'] != str(path)
+            return photo_id, 0, None, ownership_changed or previous['path'] != str(path)
         result, scored, digest = None, 0, None
         try:
             image, digest = decode(path)
@@ -223,7 +235,7 @@ class BaselineService:
             db.execute('UPDATE photos SET device=?,inode=?,size=?,mtime=?,hash=?,status=?,score=?,metrics=?,engine=?,error=?,present=1 WHERE id=?',
                        (*st, digest, result['status'], result['score'], json.dumps(result['metrics']), self.engine.version, result.get('error'), photo_id))
         warning = result.get('error') if result['status'] in ('incomplete', 'score_failed', 'decode_failed') else None
-        changed = not previous or previous['hash'] != digest or previous['status'] != result['status'] or previous['path'] != str(path)
+        changed = ownership_changed or not previous or previous['hash'] != digest or previous['status'] != result['status'] or previous['path'] != str(path)
         return photo_id, scored, warning, changed
 
     def reconcile(self, person_id, reason):
@@ -299,13 +311,13 @@ class BaselineService:
         try:
             if any(j['status'] in ('queued', 'running') for j in self.store.jobs()):
                 raise BusyError('扫描已排队，完成后再操作')
-            self.writeback.repair()
             return fn()
         finally:
             self.mutex.release()
 
     def lock(self, person_id, photo_id):
         def apply():
+            self.writeback.repair(person_id)
             with self.store.connect() as db:
                 photo = db.execute('SELECT * FROM photos WHERE id=? AND person_id=? AND present=1', (photo_id, person_id)).fetchone()
                 if not photo or photo['status'] != 'ok' or photo['score'] is None:
@@ -319,6 +331,7 @@ class BaselineService:
 
     def unlock(self, person_id):
         def apply():
+            self.writeback.repair(person_id)
             with self.store.connect() as db:
                 if not db.execute('SELECT 1 FROM people WHERE id=?', (person_id,)).fetchone():
                     raise ValueError('找不到该人物')
@@ -329,12 +342,45 @@ class BaselineService:
 
     def settings(self, settings):
         def apply():
-            root = Path(settings['root'])
-            if not root.is_absolute() or not root.is_dir():
-                raise ValueError('图库根目录不存在或未挂载')
+            folders = []
+            previous = self.store.settings()
+            for value in settings['folders']:
+                path = self.folder_path(value)
+                if any(path == other or path.is_relative_to(other) or other.is_relative_to(path) for other in folders):
+                    raise ValueError('请勿重复选择同一目录或相互包含的父子目录')
+                if str(path) not in previous['folders']:
+                    if not path.is_dir():
+                        raise ValueError(f'图库目录不可用：{path}')
+                    list(path.iterdir())
+                folders.append(path)
+            settings['folders'] = [str(p) for p in folders]
             with self.store.connect() as db:
                 db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(settings, ensure_ascii=False),))
-            for person in self.discover():
-                self.reconcile(person['id'], '设置变更后重新计算')
-                self.writeback.repair(person['id'])
+            people = self.discover()
+            if (previous['k'], previous['threshold']) != (settings['k'], settings['threshold']):
+                for person in people:
+                    self.reconcile(person['id'], '设置变更后重新计算')
+                    self.writeback.repair(person['id'])
         self.mutate(apply)
+
+    def folder_path(self, value):
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError('请选择绝对目录路径')
+        path = path.resolve()
+        if not any(path.is_relative_to(root) for root in self.browse_roots):
+            raise ValueError('该目录未挂载到服务，请选择文件夹浏览器中的目录')
+        return path
+
+    def browse(self, value=None):
+        if value is None:
+            return {'path': None, 'parent': None, 'directories': [
+                {'path': str(p), 'name': str(p), 'available': p.is_dir()} for p in self.browse_roots]}
+        path = self.folder_path(value)
+        try:
+            directories = [p for p in path.iterdir() if p.is_dir() and not p.name.startswith('.') and not p.is_symlink()]
+        except OSError as exc:
+            raise ValueError(f'无法打开目录：{path}（{exc.strerror}）') from exc
+        parent = str(path.parent) if any(path.parent.is_relative_to(root) for root in self.browse_roots) else None
+        return {'path': str(path), 'parent': parent, 'directories': [
+            {'path': str(p), 'name': p.name, 'available': True} for p in sorted(directories, key=lambda p: p.name)]}

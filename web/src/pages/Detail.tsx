@@ -70,6 +70,7 @@ export default function Detail({ id }: { id: string }) {
       </header>
 
       {person.pendingOperations.length > 0 && <div role="status" className="mt-4 rounded-lg bg-amber-soft p-3 text-sm text-amber">有 {person.pendingOperations.length} 项文件操作待修复。{person.pendingOperations.find(o => o.error)?.error}</div>}
+      <p className="mt-3 break-all text-xs text-muted">{person.directory}{!person.available && <span className="text-amber"> · 目录不可用</span>}</p>
       <Workbench person={person} d={d} s={s} busy={busy} onUnlock={unlock} />
 
       <section className="mt-10">

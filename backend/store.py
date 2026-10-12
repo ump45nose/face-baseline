@@ -46,8 +46,14 @@ class Store:
             ''')
             if not db.execute('SELECT 1 FROM settings').fetchone():
                 db.execute('INSERT INTO settings VALUES(1,?)', (json.dumps({
-                    'root': '/vol3/1000/Picture/YY/人物', 'k': 5, 'threshold': 60
+                    'folders': [], 'k': 5, 'threshold': 60
                 }, ensure_ascii=False),))
+            settings = json.loads(db.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
+            if 'root' in settings:
+                root = Path(settings.pop('root'))
+                settings['folders'] = [r['directory'] for r in db.execute('SELECT directory FROM people ORDER BY name,id')
+                                       if Path(r['directory']).parent == root]
+                db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(settings, ensure_ascii=False),))
 
     @contextmanager
     def connect(self):
