@@ -8,6 +8,7 @@ from PIL import UnidentifiedImageError
 from .images import EXTENSIONS, decode, fingerprint, thumbnail
 from .store import now
 from .quality import POLICY_VERSION, assess
+from .engine import engine_for
 from .writeback import Writeback
 
 
@@ -26,6 +27,7 @@ class ScanCancelled(Exception):
 class BaselineService:
     def __init__(self, store, engine, stable_seconds=10, browse_roots=None):
         self.store, self.engine = store, engine
+        self.engine_factory = lambda model: engine_for(model, store)
         self.stable_seconds = stable_seconds
         self.mutex = threading.Lock()
         self.jobs_mutex = threading.RLock()
@@ -81,7 +83,8 @@ class BaselineService:
                     return {'merged': True, 'job': job}
             job = dict(id=uid(), scope=scope, scopeLabel='所选图库' if scope == 'all' else person['name'],
                        trigger='manual', status='queued', processed=0, total=0, startedAt=now(),
-                       finishedAt=None, merged=0, scored=0, fileProcessed=0, fileTotal=0, cancelRequested=False, log=[])
+                       finishedAt=None, merged=0, scored=0, fileProcessed=0, fileTotal=0, cancelRequested=False,
+                       model=self.store.settings()['model'], log=[])
             self.store.job(job)
             self.wake.set()
             return {'merged': False, 'job': job}
@@ -296,11 +299,28 @@ class BaselineService:
 
     def upgrade_rules(self):
         settings = self.store.settings()
+        self.restore_cached_scores()
         for person in self.discover():
             if person['rules'] != self.rules(settings):
                 self.writeback.repair(person['id'])
                 self.reconcile(person['id'], '基线规则升级，重新核对可靠性')
                 self.writeback.repair(person['id'])
+
+    def restore_cached_scores(self):
+        # A model switch can reuse a prior result only for an unchanged file.
+        for person in self.discover():
+            with self.store.connect() as db:
+                photos = db.execute('SELECT * FROM photos WHERE person_id=? AND present=1 AND engine!=?', (person['id'], self.engine.version)).fetchall()
+                for photo in photos:
+                    path = Path(photo['path'])
+                    if not path.is_file() or fingerprint(path) != tuple(photo[k] for k in ('device', 'inode', 'size', 'mtime')):
+                        continue
+                    cached = db.execute('SELECT result FROM scores WHERE hash=? AND engine=?', (photo['hash'], self.engine.version)).fetchone()
+                    if cached:
+                        result = json.loads(cached[0])
+                        db.execute('UPDATE photos SET status=?,score=?,metrics=?,engine=?,error=? WHERE id=?',
+                                   (result['status'], result['score'], json.dumps(result['metrics']), self.engine.version, result.get('error'), photo['id']))
+                        db.execute('UPDATE people SET rules=NULL WHERE id=?', (person['id'],))
 
     def reconcile(self, person_id, reason):
         settings = self.store.settings()
@@ -318,6 +338,12 @@ class BaselineService:
             top = unique[:settings['k']]
             ranks = {p['id']: i + 1 for i, p in enumerate(top)}
             locked = next((p for p in scored if p['id'] == person['locked_id']), None)
+            if not locked:
+                locked = next((p for p in photos if p['id'] == person['locked_id'] and p['status'] == 'ok'
+                               and p['engine'] != self.engine.version and json.loads(p['metrics'] or '{}').get('FaceValidation', {}).get('matched')
+                               and p['engine'].startswith('FaceQnet-') != self.engine.version.startswith('FaceQnet-')
+                               and (self.engine.version.endswith(p['engine']) or p['engine'].endswith(self.engine.version))
+                               and Path(p['path']).is_file() and fingerprint(Path(p['path'])) == tuple(p[k] for k in ('device','inode','size','mtime'))), None)
             baseline = locked or next((p for p in top if quality[p['id']]['qualified']), None)
             # A missing/invalid locked file does not silently select a different reference.
             if person['locked_id'] and not locked:
@@ -330,10 +356,10 @@ class BaselineService:
                 snapshot = f'snapshots/{person_id}/v{version}{Path(baseline["original_name"]).suffix}' if baseline else None
                 if baseline:
                     self.writeback.record(db, person_id, bid, 'snapshot', {'destination': snapshot, 'hash': bhash})
-                db.execute('INSERT INTO history VALUES(?,?,?,?,?,?,?,?,?,?)',
+                db.execute('INSERT INTO history(person_id,version,at,reason,mode,photo_id,hash,file_name,score,snapshot,engine) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                            (person_id, version, now(), reason, mode, bid, bhash,
                             '基线__' + baseline['original_name'] if baseline else None,
-                            baseline['score'] if baseline else None, snapshot))
+                            baseline['score'] if baseline else None, snapshot, baseline['engine'] if baseline else self.engine.version))
                 db.execute('UPDATE people SET baseline_id=?,baseline_hash=?,mode=?,version=? WHERE id=?', (bid, bhash, mode, version, person_id))
             # Restore old baselines before naming a new one; every step is journaled.
             ordered = sorted(photos, key=lambda p: p['id'] == bid)
@@ -359,6 +385,7 @@ class BaselineService:
                 fields = dict(PhotoID=photo['id'], PersonID=person_id, OriginalName=original,
                               Score=str(photo['score']) if photo['score'] is not None else '',
                               Metrics=photo['metrics'] or '{}', EngineVersion=photo['engine'] or '',
+                              ScoringModel='faceqnet' if (photo['engine'] or '').startswith('FaceQnet-') else 'ofiq',
                               Qualified=str(quality[photo['id']]['qualified']),
                               CandidateRank=str(rank) if rank else '',
                               CurrentBaseline=str(photo['id'] == bid) if active else '',
@@ -409,6 +436,8 @@ class BaselineService:
         def apply():
             folders = []
             previous = self.store.settings()
+            settings['model'] = settings.get('model', previous['model'])
+            settings['thresholds'] = {**previous['thresholds'], settings['model']: settings['threshold']}
             for value in settings['folders']:
                 path = self.folder_path(value)
                 if any(path == other or path.is_relative_to(other) or other.is_relative_to(path) for other in folders):
@@ -419,10 +448,15 @@ class BaselineService:
                     list(path.iterdir())
                 folders.append(path)
             settings['folders'] = [str(p) for p in folders]
+            if previous['model'] != settings['model']:
+                self.engine.close()
+                self.engine = self.engine_factory(settings['model'])
             with self.store.connect() as db:
                 db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(settings, ensure_ascii=False),))
             people = self.discover()
-            if (previous['k'], previous['threshold']) != (settings['k'], settings['threshold']):
+            if previous['model'] != settings['model']:
+                self.restore_cached_scores()
+            if (previous['k'], previous['threshold'], previous['model']) != (settings['k'], settings['threshold'], settings['model']):
                 for person in people:
                     self.reconcile(person['id'], '设置变更后重新计算')
                     self.writeback.repair(person['id'])

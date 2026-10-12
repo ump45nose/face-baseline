@@ -2,13 +2,14 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .engine import OfiqEngine
+from .engine import OfiqEngine, engine_for
 from .service import BaselineService, BusyError
 from .store import Store
 from .quality import assess
@@ -18,6 +19,7 @@ class Settings(BaseModel):
     folders: list[str]
     k: int = Field(ge=1, le=100)
     threshold: int = Field(ge=0, le=100)
+    model: Literal['faceqnet', 'ofiq'] | None = None
 
 
 class Lock(BaseModel):
@@ -28,12 +30,36 @@ class Scan(BaseModel):
     scope: str = 'all'
 
 
+PHOTO_FIELDS = 'id,person_id,path,original_name,status,score,metrics,engine,error,hash,added,rank,writeback'
+
+
 def serialize_person(store, person, engine_version=OfiqEngine.version):
     settings = store.settings()
     with store.connect() as db:
-        photos = db.execute('SELECT * FROM photos WHERE person_id=? AND present=1 ORDER BY added,id', (person['id'],)).fetchall()
+        photos = db.execute(f'SELECT {PHOTO_FIELDS} FROM photos WHERE person_id=? AND present=1 ORDER BY added,id', (person['id'],)).fetchall()
         histories = db.execute('SELECT * FROM history WHERE person_id=? ORDER BY version DESC', (person['id'],)).fetchall()
         ops = [dict(r) for r in db.execute("SELECT id,kind,photo_id,error FROM operations WHERE person_id=? AND status='pending'", (person['id'],))]
+    return serialize_person_rows(store, person, settings, engine_version, photos, histories, ops)
+
+
+def serialize_people(store, people, engine_version):
+    # Read the gallery in bulk instead of reopening SQLite for every directory.
+    with store.connect() as db:
+        db.execute('BEGIN')
+        settings = json.loads(db.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
+        photos = db.execute(f'SELECT {PHOTO_FIELDS} FROM photos WHERE present=1 ORDER BY added,id').fetchall()
+        histories = db.execute('SELECT * FROM history ORDER BY version DESC').fetchall()
+        operations = db.execute("SELECT id,person_id,kind,photo_id,error FROM operations WHERE status='pending' ORDER BY id").fetchall()
+    grouped = {p['id']: ([], [], []) for p in people}
+    for index, records in enumerate((photos, histories, operations)):
+        for row in records:
+            if row['person_id'] in grouped:
+                grouped[row['person_id']][index].append(row)
+    return [serialize_person_rows(store, person, settings, engine_version, *grouped[person['id']]) for person in people]
+
+
+def serialize_person_rows(store, person, settings, engine_version, photos, histories, operations):
+    ops = [{key: row[key] for key in ('id','kind','photo_id','error')} for row in operations]
     result = dict(id=person['id'], name=person['name'], directory=person['directory'], available=Path(person['directory']).is_dir(), lockedPhotoId=person['locked_id'],
                   baselineId=person['baseline_id'], mode=person['mode'], lastScan=person['last_scan'],
                   version=person['version'], pendingOperations=ops, photos=[], history=[])
@@ -50,7 +76,7 @@ def serialize_person(store, person, engine_version=OfiqEngine.version):
                                     url=f'/api/photos/{p["id"]}/file' if thumb.exists() and p['status'] != 'incomplete' else None,
                                     thumbnailUrl=f'/api/photos/{p["id"]}/thumbnail' if thumb.exists() and p['status'] != 'incomplete' else None,
                                     status=p['status'], score=p['score'], sub=subs if p['status'] == 'ok' else None,
-                                    metrics=metrics, engine=p['engine'], error=p['error'],
+                                    metrics=metrics, engine=p['engine'], model='faceqnet' if (p['engine'] or '').startswith('FaceQnet-') else 'ofiq', error=p['error'],
                                     eligible=quality['eligible'], qualified=quality['qualified'], qualityIssues=quality['issues'],
                                     assessmentFace=metrics.get('FaceValidation', {}).get('box'), imageSize=metrics.get('ImageSize'),
                                     hash=p['hash'] or p['id'], addedAt=p['added'], rank=p['rank'], writeback=p['writeback']))
@@ -58,14 +84,14 @@ def serialize_person(store, person, engine_version=OfiqEngine.version):
         available = h['snapshot'] and (store.data / h['snapshot']).is_file()
         result['history'].append(dict(version=h['version'], at=h['at'], reason=h['reason'],
                                       mode='none' if h['mode'] == 'missing' else h['mode'], photoId=h['photo_id'],
-                                      fileName=h['file_name'], score=h['score'],
+                                      fileName=h['file_name'], score=h['score'], engine=h['engine'], model='faceqnet' if (h['engine'] or '').startswith('FaceQnet-') else 'ofiq',
                                       snapshotUrl=f'/api/people/{person["id"]}/history/{h["version"]}/snapshot' if available else None))
     return result
 
 
 def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots=None):
     store = Store(Path(data or os.environ.get('FACE_BASELINE_DATA', '/data')))
-    engine = engine or OfiqEngine()
+    engine = engine or engine_for(store.settings()['model'], store)
     roots = browse_roots or json.loads(os.environ.get('FACE_BASELINE_LIBRARY_BASES', '["/vol3/1000/Picture/YY/人物"]'))
     service = BaselineService(store, engine, stable_seconds, roots)
 
@@ -79,9 +105,9 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
         service.upgrade_rules()
         yield
         service.close()
-        engine.close()
+        service.engine.close()
 
-    app = FastAPI(title='人脸基线', version='1.3.0', lifespan=lifespan)
+    app = FastAPI(title='人脸基线', version='1.4.1', lifespan=lifespan)
     app.state.service = service
 
     @app.exception_handler(ValueError)
@@ -105,7 +131,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
     @app.get('/healthz')
     def health():
         folders = store.settings()['folders']
-        return {'status': 'ok', 'libraryAvailable': bool(folders) and all(Path(p).is_dir() for p in folders), 'engine': engine.version}
+        return {'status': 'ok', 'libraryAvailable': bool(folders) and all(Path(p).is_dir() for p in folders), 'engine': service.engine.version, 'model': store.settings()['model']}
 
     @app.get('/api/state')
     def state():
@@ -113,8 +139,8 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
         with store.connect() as db:
             people = db.execute('SELECT * FROM people ORDER BY name,id').fetchall()
         return dict(settings=settings,
-                    people=[serialize_person(store, p, engine.version) for p in people if p['directory'] in settings['folders']],
-                    jobs=store.jobs(), libraryAvailable=bool(settings['folders']) and all(Path(p).is_dir() for p in settings['folders']), engine=engine.version)
+                    people=serialize_people(store, [p for p in people if p['directory'] in settings['folders']], service.engine.version),
+                    jobs=store.jobs(), libraryAvailable=bool(settings['folders']) and all(Path(p).is_dir() for p in settings['folders']), engine=service.engine.version)
 
     @app.get('/api/folders')
     def folders(path: str | None = None):
@@ -130,7 +156,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
             p = db.execute('SELECT * FROM people WHERE id=?', (person_id,)).fetchone()
         if not p:
             raise HTTPException(404, '找不到该人物')
-        return serialize_person(store, p, engine.version)
+        return serialize_person(store, p, service.engine.version)
 
     @app.get('/api/people/{person_id}/candidates')
     def candidates(person_id: str):
@@ -154,7 +180,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
 
     @app.put('/api/settings')
     def settings(body: Settings):
-        service.settings(body.model_dump())
+        service.settings(body.model_dump(exclude_none=True))
         return state()
 
     @app.post('/api/scans', status_code=202)

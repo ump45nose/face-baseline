@@ -46,7 +46,8 @@ class Store:
             ''')
             if not db.execute('SELECT 1 FROM settings').fetchone():
                 db.execute('INSERT INTO settings VALUES(1,?)', (json.dumps({
-                    'folders': [], 'k': 5, 'threshold': 60
+                    'folders': [], 'k': 5, 'model': 'faceqnet', 'threshold': 40,
+                    'thresholds': {'faceqnet': 40, 'ofiq': 60}
                 }, ensure_ascii=False),))
             settings = json.loads(db.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
             if 'root' in settings:
@@ -54,6 +55,11 @@ class Store:
                 settings['folders'] = [r['directory'] for r in db.execute('SELECT directory FROM people ORDER BY name,id')
                                        if Path(r['directory']).parent == root]
                 db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(settings, ensure_ascii=False),))
+            if 'model' not in settings:
+                settings.update(model='faceqnet', thresholds={'ofiq': settings['threshold'], 'faceqnet': 40}, threshold=40)
+                db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(settings, ensure_ascii=False),))
+            if 'engine' not in [r['name'] for r in db.execute('PRAGMA table_info(history)')]:
+                db.execute('ALTER TABLE history ADD COLUMN engine TEXT')
 
     @contextmanager
     def connect(self):

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { api } from '../data/api'
-import { derive, displayName, fmtTime, reasons, statusText, type Derived } from '../data/logic'
+import { derive, displayName, fmtTime, reasons, statusText, formatScore, modelName, type Derived } from '../data/logic'
 import { BUSY_REASON, useActiveJob, useAppState } from '../data/useStore'
 import { Badge, Button, DownloadButton, Meter, PhotoCanvas, StatusText, Tabs, useUI } from '../components/ui'
 import Icon from '../components/icons'
@@ -130,7 +130,7 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
           <>
             <div className="mt-3 flex items-end justify-between">
               <div className="flex items-baseline gap-1.5">
-                <span className={`text-[44px] leading-none font-semibold tracking-tight tabular-nums ${d.reliable ? '' : 'text-amber'}`}>{b.score}</span>
+                <span className={`text-[44px] leading-none font-semibold tracking-tight tabular-nums ${d.reliable ? '' : 'text-amber'}`}>{formatScore(b.score)}</span>
                 <span className="text-xs text-muted">/ 100</span>
               </div>
               <div className="flex flex-col items-end gap-1">
@@ -139,8 +139,8 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
               </div>
             </div>
             <div className="mt-3">
-              <Meter value={b.score!} threshold={s.threshold} />
-              <div className="mt-1.5 text-[11px] text-muted">OFIQ 总分 · 合格门槛 {s.threshold}</div>
+              <Meter value={b.score!} threshold={s.thresholds[b.model]} />
+              <div className="mt-1.5 text-[11px] text-muted">{modelName(b.model)} 总分 · 合格门槛 {s.thresholds[b.model]}</div>
             </div>
             {!d.reliable && (
               <div className="mt-4 rounded-lg bg-amber-soft px-3 py-2.5 text-[13px] leading-relaxed text-amber">
@@ -148,7 +148,7 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
               </div>
             )}
 
-            <p className="mt-3 text-[11px] text-muted">绿色框标出实际评分人脸。OFIQ 总分由独立模型计算，不是下方分项的平均值。</p>
+            <p className="mt-3 text-[11px] text-muted">绿色框标出实际评分人脸。{modelName(b.model)} 总分独立计算，下方 OFIQ 分项用于检查基线适用性。</p>
             {b.qualityIssues.length > 0 && <ul className="mt-3 space-y-1 text-xs text-amber">{b.qualityIssues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
 
             <div className="mt-5 space-y-2.5 border-t border-line pt-4">
@@ -183,7 +183,7 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
             </dl>
 
             <details className="mt-3 text-xs text-muted">
-              <summary className="cursor-pointer">全部 OFIQ 分项</summary>
+              <summary className="cursor-pointer">完整评分记录</summary>
               <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-well p-2 text-[10px]">{JSON.stringify(b.metrics, null, 2)}</pre>
             </details>
             <div className="mt-auto flex flex-col gap-2 pt-5 sm:flex-row lg:flex-col">
@@ -207,7 +207,7 @@ function Workbench({ person, d, s, busy, onUnlock }: { person: Person; d: Derive
                 : '暂无通过新版单人复核的照片。旧结果需重新扫描；无脸、多人或评分失败的照片不能作为基线。'}
             </p>
             <dl className="mt-5 border-t border-line pt-3">
-              <Row label="最高分">{d.top[0] ? `${d.top[0].score} 分` : '—'}</Row>
+              <Row label="最高分">{d.top[0] ? `${formatScore(d.top[0].score)} 分` : '—'}</Row>
               <Row label="门槛">{s.threshold} 分</Row>
             </dl>
             {person.lockedPhotoId && <Button variant="ghost" icon="unlock" onClick={onUnlock} disabled={busy} className="mt-5">取消锁定，恢复自动</Button>}
@@ -254,7 +254,7 @@ function Candidate({ p, rank, d, s, busy, onLock, dup }: { p: Photo; rank?: numb
         {scored ? (
           <>
             <div className="flex items-baseline justify-between gap-2">
-              <span className={`text-[17px] font-semibold tabular-nums ${pass ? '' : 'text-amber'}`}>{p.score}</span>
+              <span className={`text-[17px] font-semibold tabular-nums ${pass ? '' : 'text-amber'}`}>{formatScore(p.score)}</span>
               <StatusText tone={pass ? 'moss' : 'amber'}>{pass ? '合格' : '质量不足'}</StatusText>
             </div>
             <div className="mt-0.5 truncate text-xs text-muted" title={p.name}>
@@ -277,7 +277,7 @@ function Candidate({ p, rank, d, s, busy, onLock, dup }: { p: Photo; rank?: numb
             </button>
             {open && (
               <ul className="mb-2 space-y-1.5 rounded-lg bg-well/70 p-2.5">
-                <li className="text-[11px] text-muted">OFIQ 总分独立计算；分项用于检查基线适用性。</li>
+                <li className="text-[11px] text-muted">{modelName(p.model)} 总分独立计算；OFIQ 分项用于检查基线适用性。</li>
                 {p.qualityIssues.map(issue => <li key={issue} className="text-xs text-amber">{issue}</li>)}
                 {reasons(p).map((r) => (
                   <li key={r.label} className="flex justify-between gap-2 text-xs">
@@ -344,7 +344,7 @@ function TopView({ d, s, busy, onLock }: { d: Derived; s: Settings; busy: boolea
               锁定照片
             </h3>
             <span className="text-[13px] text-muted">
-              {d.locked.eligible ? `排名第 ${d.rankOf.get(d.locked.id)}，不在 Top ${s.k}；锁定选择保持不变` : '锁定记录保留，该照片尚未通过单人复核；通过前不会作为当前基线'}
+              {d.locked.eligible ? `排名第 ${d.rankOf.get(d.locked.id)}，不在 Top ${s.k}；锁定选择保持不变` : d.baseline?.id === d.locked.id ? '锁定照片等待当前模型复核，原基线继续保留' : '锁定记录保留；通过当前检测复核后才能作为基线'}
             </span>
           </div>
           <div className={grid}>
@@ -402,7 +402,7 @@ function HistoryView({ person }: { person: Person }) {
               <div className="mt-1 text-[13px] text-ink">{h.reason}</div>
               {h.fileName && (
                 <div className="mt-0.5 truncate text-xs text-muted">
-                  {h.fileName} · {h.score} 分
+                  {h.fileName} · {modelName(h.model)} {formatScore(h.score)} 分
                 </div>
               )}
             </div>

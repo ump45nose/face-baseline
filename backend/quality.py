@@ -1,7 +1,7 @@
 import json
 
 
-POLICY_VERSION = 'baseline-v2'
+POLICY_VERSION = 'baseline-v3-models'
 MINIMUMS = (
     ('Sharpness', 70, '脸部清晰度不足（需 ≥70）'),
     ('InterEyeDistance', 70, '脸部有效像素不足（眼间距需 ≥70px）'),
@@ -18,14 +18,15 @@ MINIMUMS = (
 def assess(photo, threshold, engine_version):
     metrics = json.loads(photo['metrics'] or '{}')
     if photo['engine'] != engine_version:
-        return {'eligible': False, 'qualified': False, 'issues': ['检测规则已升级，等待重新扫描']}
+        return {'eligible': False, 'qualified': False, 'issues': ['评分模型或检测规则已变更，等待重新评分']}
     if photo['status'] != 'ok' or photo['score'] is None:
         return {'eligible': False, 'qualified': False, 'issues': [photo['error'] or '照片无法作为基线']}
     if not metrics.get('FaceValidation', {}).get('matched'):
         return {'eligible': False, 'qualified': False, 'issues': ['评分人脸尚未通过检测复核']}
     issues = []
     if photo['score'] < threshold:
-        issues.append(f'OFIQ 总分低于 {threshold}')
+        label = 'FaceQnet' if engine_version.startswith('FaceQnet-') else 'OFIQ'
+        issues.append(f'{label} 总分低于 {threshold}')
     for name, minimum, message in MINIMUMS:
         item = metrics.get(name)
         value = item.get('raw' if name == 'InterEyeDistance' else 'scalar') if item and item['code'] == 0 else None

@@ -1,6 +1,8 @@
 import type { Person, Photo, Settings, PhotoStatus } from './types'
 
 export const BASELINE_PREFIX = '基线__'
+export const modelName = (model: 'faceqnet' | 'ofiq') => model === 'faceqnet' ? 'FaceQnet' : 'OFIQ'
+export const formatScore = (score: number | null) => score == null ? '—' : Number.isInteger(score) ? String(score) : score.toFixed(1)
 
 export function isScored(p: Photo) {
   return p.eligible

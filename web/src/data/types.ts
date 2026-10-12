@@ -16,6 +16,7 @@ export interface Photo {
   thumbnailUrl: string | null
   metrics: Record<string, unknown>
   engine: string | null
+  model: 'faceqnet' | 'ofiq'
   eligible: boolean
   qualified: boolean
   qualityIssues: string[]
@@ -41,6 +42,8 @@ export interface HistoryEntry {
   photoId: string | null
   fileName: string | null
   score: number | null
+  engine: string | null
+  model: 'faceqnet' | 'ofiq'
   snapshotUrl: string | null
 }
 
@@ -62,6 +65,8 @@ export interface Settings {
   folders: string[]
   k: number
   threshold: number
+  model: 'faceqnet' | 'ofiq'
+  thresholds: { faceqnet: number; ofiq: number }
 }
 
 export interface FolderListing {
@@ -87,6 +92,7 @@ export interface ScanJob {
   fileProcessed: number
   fileTotal: number
   cancelRequested?: boolean
+  model?: 'faceqnet' | 'ofiq'
   log: { level: 'info' | 'warn' | 'error'; text: string }[]
 }
 

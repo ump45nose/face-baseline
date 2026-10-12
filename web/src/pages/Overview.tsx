@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { api } from '../data/api'
-import { derive, fmtTime, type Derived } from '../data/logic'
+import { derive, fmtTime, formatScore, type Derived } from '../data/logic'
 import { useActiveJob, useAppState } from '../data/useStore'
 import { Button, JobBadge, PhotoCanvas, Progress, StatusText, useUI } from '../components/ui'
 import Icon from '../components/icons'
@@ -179,7 +179,7 @@ function PersonCard({ person, settings }: { person: Person; settings: Settings }
         <div className="mb-1 truncate text-[11px] text-muted" title={person.directory}>{person.directory}</div>
         <div className="flex items-baseline justify-between gap-2">
           <span className="truncate text-[15px] font-medium group-hover:text-moss">{person.name}</span>
-          {b && <span className={`text-[15px] font-semibold tabular-nums ${d.reliable ? 'text-ink' : 'text-amber'}`}>{b.score}</span>}
+          {b && <span className={`text-[15px] font-semibold tabular-nums ${d.reliable ? 'text-ink' : 'text-amber'}`}>{formatScore(b.score)}</span>}
         </div>
         <div className="mt-1 flex items-center justify-between gap-2">
           <StatusText tone={st.tone} className="truncate">

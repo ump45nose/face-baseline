@@ -2,7 +2,7 @@ import type { AppState, FolderListing, ScanJob, Settings } from './types'
 
 class HttpBaselineApi {
   private state: AppState = {
-    settings: { folders: [], k: 5, threshold: 60 },
+    settings: { folders: [], k: 5, threshold: 40, model: 'faceqnet', thresholds: { faceqnet: 40, ofiq: 60 } },
     people: [], jobs: [], loaded: false, error: null, libraryAvailable: false, engine: '',
   }
   private subs = new Set<() => void>()

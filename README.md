@@ -1,6 +1,6 @@
-# 人脸基线扫描工具 v1.3
+# 人脸基线扫描工具 v1.4.1
 
-多选 NAS 文件夹，每个所选目录就是一个独立图库。使用固定 OFIQ 保留 Top K，自动挑选合格基线或保留手动锁定。
+多选 NAS 文件夹，每个所选目录就是一个独立图库。默认使用固定 FaceQnet v1 保留 Top K，OFIQ 1.0.3 可在设置页选择；自动挑选合格基线或保留手动锁定。
 现有 Figma Make 三页设计已接上 FastAPI、SQLite 和串行扫描 worker。
 
 ## 使用
@@ -9,12 +9,12 @@ NAS 网页：`http://192.168.31.201:33081/`；本机 API：`http://127.0.0.1:330
 API 文档 `/docs`。网页提供文件夹多选器，目前浏览范围为 `/vol3/1000/Picture/YY/人物`，已选择该目录的全部子目录。每个选中目录单独作为一个图库，递归读取 JPG/JPEG/PNG。
 只在网页或 API 手动触发时扫描；没有定时扫描、实时监听或开机自动续扫。新增子目录不会自动选入。
 
-默认 K=5、总分门槛 60。Top K 优先保留通过基线质量检查的单人照片，再以 OFIQ 总分排序；不足 K 时可包含低质量单人照。自动基线须通过全部检查。
+默认 K=5。FaceQnet 总分为原始 0–1 分乘以 100，初始试用门槛 40；OFIQ 保留原门槛（初始 60），两个模型分别保存门槛。Top K 优先保留通过基线质量检查的单人照片，再以当前模型总分排序；不足 K 时可包含低质量单人照。自动基线须通过全部检查。
 无脸、多人、解码/评分失败的照片不可选。手动允许锁定低分单人照片，会提示质量不足。
 锁定图掉榜也继续保留；取消锁定立即自动选择。所有原文件保留。
 
 仅当前基线加 `基线__` 前缀，切换时旧图恢复原名；重名加稳定照片 ID，绝不覆盖。
-Top K 和手选图使用专属 XMP-fb 字段记录身份、原名、OFIQ 原生/归一分项、引擎版本、
+Top K 和手选图使用专属 XMP-fb 字段记录身份、原名、评分模型、当前模型总分、OFIQ 原生/归一分项、引擎版本、
 合格状态和活动标记。退出候选清除活动标记，评分保留。原拍摄信息及压缩图像内容保留。
 
 ## 扫描与恢复
@@ -38,13 +38,17 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 
 ## 基线质量复核
 
+FaceQnet 使用“小钰”对照实验的同一套固定 MXNet MTCNN 权重和框裁切流程，以 ONNX Runtime 在 CPU 推理。输入是 BGR float32、224×224、0–255，不额外归一化。FaceQnet 与 MTCNN 的原始权重、转换文件散列和来源记录在私有引擎目录 `faceqnet/manifest.json`；正式服务不安装 TensorFlow 或 MXNet。PNet 使用 522px 图块、512px 步长及 10px 重叠保持完整感受野；RNet/ONet 每批 64 个候选，避免大图推理突破既有 2 GiB 限制。图像尺度、检测阈值、坐标和评分预处理保持相同。清晰度、眼睛、姿态、遮挡、光照等分项继续由固定 OFIQ 提供；FaceQnet 模式不使用 OFIQ 总分决定排名或合格。
+
+模型切换不会自动扫描。评分缓存按图像内容和完整引擎版本隔离；选回已使用的模型时，未变化照片直接恢复该模型的缓存。已有单人复核且未变化的锁定图在模型切换期间继续作为基线，评分后按当前检测结果核对；历史快照保留。检测规则升级仍需重新复核，不会把旧自动候选当作已确认结果。
+
 全图使用固定 OpenCV Zoo YuNet 2023mar，在 640/1280 两个尺度检测并合并重复框。检测置信度 0.6，不能确认单人、检测到多人或两次检测位置不一致时均不能入选。通过全图复核后，临时裁切人脸及周边供 OFIQ 评分；原照片、缩略图和历史快照仍保存完整原图，不写入裁切内容。网页绿色框标明实际评分人脸。单人复核与目录命名不构成人物身份识别。
 
 自动基线的初始检查门槛：OFIQ 总分达到配置值、Sharpness ≥70、原始眼间距 ≥70px、人脸宽高 ≥120px、EyesVisible ≥80、EyesOpen ≥70、FaceOcclusionPrevention ≥80、Yaw/Pitch/Roll ≥80、IlluminationUniformity ≥50；任何必需指标无法评估也不自动选择。它们是本工具的初始适用性规则，须经实际图库继续校准。低质量单人照可手动锁定并显示具体原因；多人照不能通过锁定绕过复核。
 
 OFIQ UnifiedQualityScore 来自独立模型，分项用于检查适用性，不是总分的加权解释。升级规则时先撤下尚未复核的自动基线并恢复旧原名，保留锁定 ID、所有历史快照和评分缓存；重新扫描后通过新版单人复核的锁定图继续生效，不能通过的锁定记录仍保留但不作为当前基线。升级不会自行提交扫描；本次修复人工提交图库复核任务。
 
-固定 1.0.3 的总分使用 MagFace 人脸识别质量模型，再以 `round(100/(1+exp((23-raw)/2.6)))` 映射为 0–100。它预测识别用途的质量，不是美观度或生图参考脸的适用性评分；光照与姿态良好不能推导出高总分。[原版实现](https://github.com/BSI-OFIQ/OFIQ-Project/blob/v1.0.3/OFIQlib/modules/measures/src/UnifiedQualityScore.cpp)。当前 Top K 仍按合格优先和总分排序，未实现相近连拍或角度多样性选择。
+固定 1.0.3 的总分使用 MagFace 人脸识别质量模型，再以 `round(100/(1+exp((23-raw)/2.6)))` 映射为 0–100。它预测识别用途的质量，不是美观度或生图参考脸的适用性评分；光照与姿态良好不能推导出高总分。[原版实现](https://github.com/BSI-OFIQ/OFIQ-Project/blob/v1.0.3/OFIQlib/modules/measures/src/UnifiedQualityScore.cpp)。当前 Top K 仍按合格优先和当前模型总分排序，未实现相近连拍或角度多样性选择。
 
 Tonfotos 官方支持将已确认的人名和人脸区域写入 XMP，也可在导出 JPEG 时包含这些数据；[官方说明](https://tonfotos.com/docs/people/xmp-face-regions/)未提供人脸质量分数的导出字段。因此不能把该功能当作质量评分来源。后续可读取人脸标注辅助人工核对，本工具的质量数据继续写入自己的 XMP 命名空间。
 
@@ -88,12 +92,14 @@ BENCH_DATA=/vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012
 ```sh
 python3 scripts/prepare-engine.py /vol2/1000/Docker/face-baseline/engine
 python3 scripts/prepare-detector.py /vol2/1000/Docker/face-baseline/engine/yunet
+# 转换在独立实验环境执行；正式服务只安装 ONNX Runtime。
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 /vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012/venv/bin/python scripts/prepare-faceqnet.py --checkpoint /vol2/1000/Docker/face-baseline/experiments/xiaoyu-fiqa-20261012/FaceQnet_v1.h5 --mtcnn /vol1/1000/Code/face-quality-reference/SER-FIQ/insightface/mtcnn-model --output /vol2/1000/Docker/face-baseline/engine/faceqnet
 cd web
 npm ci
 npx tsc --noEmit
 npm run build
 cd ..
-docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.2.0 .
+docker buildx build --load --build-context ofiq=/vol2/1000/Docker/face-baseline/engine -t local/face-baseline:1.4.1 .
 docker compose -p utilities -f /vol2/1000/Docker/stacks/utilities/compose.yaml up -d --no-deps face-baseline
 ```
 

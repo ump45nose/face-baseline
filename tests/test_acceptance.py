@@ -41,7 +41,7 @@ def setup(tmp_path):
     (root / '甲').mkdir(parents=True)
     store = Store(tmp_path / 'data')
     with store.connect() as db:
-        db.execute('UPDATE settings SET value=?', (json.dumps(dict(folders=[str(root / "甲")], k=5, threshold=60)),))
+        db.execute('UPDATE settings SET value=?', (json.dumps(dict(folders=[str(root / "甲")], k=5, threshold=60, model='ofiq', thresholds={'ofiq':60,'faceqnet':40})),))
     engine = Engine()
     service = BaselineService(store, engine, 0, [root])
     person = service.discover()[0]
@@ -493,9 +493,9 @@ def test_legacy_migration_and_manual_restart(setup):
     scan(service)
     old = state(store, pid)
     with store.connect() as db:
-        db.execute('UPDATE settings SET value=?', (json.dumps(dict(root=str(directory.parent), k=5, threshold=60)),))
+        db.execute('UPDATE settings SET value=?', (json.dumps(dict(root=str(directory.parent), k=5, threshold=60, model='ofiq', thresholds={'ofiq':60,'faceqnet':40})),))
     migrated = Store(store.data)
-    assert migrated.settings() == dict(folders=[str(directory)], k=5, threshold=60)
+    assert migrated.settings() == dict(folders=[str(directory)], k=5, threshold=60, model='ofiq', thresholds={'ofiq':60,'faceqnet':40})
     assert state(migrated, pid) == old
     queued = service.submit()['job']
     restart = BaselineService(migrated, engine, 0, [directory.parent])

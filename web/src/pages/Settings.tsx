@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { api } from '../data/api'
-import { fmtTime } from '../data/logic'
+import { fmtTime, modelName } from '../data/logic'
 import { BUSY_REASON, useActiveJob, useAppState } from '../data/useStore'
 import { Button, JobBadge, Progress, useUI } from '../components/ui'
 import Icon from '../components/icons'
@@ -40,7 +40,7 @@ export default function SettingsPage() {
   const job = useActiveJob()
   const scan = useScanAction()
   const { toast } = useUI()
-  const init = () => ({ folders: [...state.settings.folders], k: String(state.settings.k), threshold: String(state.settings.threshold) })
+  const init = () => ({ folders: [...state.settings.folders], k: String(state.settings.k), threshold: String(state.settings.threshold), model: state.settings.model })
   const [form, setForm] = useState(init)
   const [picker, setPicker] = useState(false)
   useEffect(() => setForm(init()), [state.settings])
@@ -51,15 +51,15 @@ export default function SettingsPage() {
     k: form.k === '' || !Number.isInteger(k) || k < 1 || k > 100 ? '需为 1–100 的整数' : '',
     threshold: form.threshold === '' || !Number.isInteger(t) || t < 0 || t > 100 ? '需为 0–100 的整数' : '',
   }
-  const dirty = JSON.stringify(form.folders) !== JSON.stringify(state.settings.folders) || k !== state.settings.k || t !== state.settings.threshold
+  const dirty = JSON.stringify(form.folders) !== JSON.stringify(state.settings.folders) || k !== state.settings.k || t !== state.settings.threshold || form.model !== state.settings.model
   const valid = !errs.k && !errs.threshold
   const busy = !!job
   const last = state.jobs.find((j) => j.status !== 'queued' && j.status !== 'running')
   const latest = state.jobs[0]
 
   const save = async () => {
-    await api.saveSettings({ folders: form.folders, k, threshold: t })
-    toast('设置已保存')
+    await api.saveSettings({ folders: form.folders, k, threshold: t, model: form.model, thresholds: state.settings.thresholds })
+    toast(form.model !== state.settings.model ? '评分模型已切换；请手动扫描更新排名，旧缓存与锁定保留' : '设置已保存')
   }
 
   const stopScan = async () => {
@@ -161,12 +161,20 @@ export default function SettingsPage() {
           <p className="px-4 py-3 text-xs text-muted sm:px-5">移除目录不会删除照片、评分和历史；重新选入可继续使用原档案。保存设置后不会自动扫描。</p>
         </Section>
 
-        <Section title="基线规则" desc="合格单人照优先进入候选；自动基线须同时通过总分与质量检查">
+        <Section title="评分与基线规则" desc="选择排名模型；自动基线须同时通过该模型门槛与共用质量检查">
+          <FormRow label="评分模型" hint="FaceQnet 为默认，OFIQ 可选">
+            <select aria-label="评分模型" value={form.model} disabled={busy} onChange={e => { const model = e.target.value as 'faceqnet' | 'ofiq'; setForm({ ...form, model, threshold: String(state.settings.thresholds[model]) }) }} className="h-10 w-full rounded-lg bg-card px-3 text-sm ring-1 ring-line-2/80 outline-none disabled:text-muted sm:h-9 sm:w-60">
+              <option value="faceqnet">FaceQnet v1（默认）</option>
+              <option value="ofiq">OFIQ 1.0.3</option>
+            </select>
+          </FormRow>
+          <p className="px-4 py-4 text-xs leading-relaxed text-muted sm:px-5">FaceQnet 原始 0–1 分乘以 100 展示，各模型分别保存门槛；FaceQnet 初始试用值为 40，OFIQ 保留原设置。切换只复用同一模型、同一图像内容的评分；没有缓存的照片需要手动扫描。手动锁定保留，已确认的锁定图在新模型评分前继续作为基线。</p>
           <p className="px-4 py-4 text-xs leading-relaxed text-muted sm:px-5">单人照片先经全图检测与评分位置复核。自动选择要求：清晰度 ≥70、眼间距 ≥70px、人脸宽高 ≥120px、眼睛可见 ≥80、眼睛张开 ≥70、遮挡与三轴姿态 ≥80、光照均匀度 ≥50。低质量单人照片仍可手动锁定。</p>
           <FormRow label="候选数量 K" hint="每人保留 Top K，1–100">
             {input('k', 'sm:w-28 tabular-nums', { inputMode: 'numeric' })}
           </FormRow>
-          <FormRow label="合格门槛" hint="OFIQ 总分，0–100">
+          <p className="px-4 py-3 text-xs text-muted sm:px-5">清晰度、眼睛、遮挡、姿态及光照分项由 OFIQ 提供，作为共用检查；FaceQnet 模式不使用 OFIQ 总分决定排名或合格。</p>
+          <FormRow label="合格门槛" hint={`${modelName(form.model)} 总分，0–100`}>
             {input('threshold', 'sm:w-28 tabular-nums', { inputMode: 'numeric' })}
           </FormRow>
           <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-end sm:px-5">

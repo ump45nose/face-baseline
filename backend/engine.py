@@ -98,3 +98,10 @@ class OfiqEngine:
             self.process.terminate()
             self.process.wait(timeout=5)
             self.process = None
+
+
+def engine_for(model, store):
+    if model == 'ofiq':
+        return OfiqEngine()
+    from .faceqnet import FaceQnetEngine
+    return FaceQnetEngine(store)
