@@ -62,6 +62,11 @@ export default function SettingsPage() {
     toast('设置已保存')
   }
 
+  const stopScan = async () => {
+    await api.stopScans()
+    toast('已请求停止；完成当前照片及必要写回后停止，排队任务已取消')
+  }
+
   const input = (key: 'k' | 'threshold', extra: string, props: object = {}) => (
     <div>
       <input
@@ -106,7 +111,7 @@ export default function SettingsPage() {
                   <p className="mt-2 text-xs text-muted">
                     {job.fileProcessed}/{job.fileTotal} 张照片 · 本次评分 {job.scored} 张 · {' '}
                     {job.merged > 0 ? `已合并 ${job.merged} 次重复请求 · ` : ''}
-                    {BUSY_REASON}
+                    {job.cancelRequested ? '正在停止，等待当前照片和必要写回完成…' : BUSY_REASON}
                   </p>
                 </>
               ) : (
@@ -118,12 +123,19 @@ export default function SettingsPage() {
                   {last?.status === 'failed' && <p className="mt-1 text-xs text-danger">上次扫描失败，已完成的档案和文件操作保留，可继续重试。</p>}
                   {last?.status === 'partial' && <p className="mt-1 text-xs text-amber">有待处理项，查看运行记录；再次扫描会继续处理。</p>}
                   {last?.status === 'done' && <p className="mt-1 text-xs text-muted">一切正常。</p>}
+                  {last?.status === 'cancelled' && <p className="mt-1 text-xs text-muted">已停止；已完成的评分与基线保留，再次扫描会跳过未变化照片。</p>}
                 </>
               )}
             </div>
-            <Button disabled={!state.settings.folders.length} variant="primary" icon={job ? 'refresh' : 'scan'} onClick={() => scan('all')} className="w-full sm:w-auto">
-              {job ? '再次请求（将合并）' : last?.status === 'failed' || last?.status === 'partial' ? '立即重试扫描' : '扫描所选图库'}
-            </Button>
+            {job ? (
+              <Button disabled={job.cancelRequested} variant="warn" icon="x" onClick={stopScan} className="w-full sm:w-auto">
+                {job.cancelRequested ? '正在停止…' : '停止扫描'}
+              </Button>
+            ) : (
+              <Button disabled={!state.settings.folders.length} variant="primary" icon="scan" onClick={() => scan('all')} className="w-full sm:w-auto">
+                {last?.status === 'failed' || last?.status === 'partial' ? '立即重试扫描' : last?.status === 'cancelled' ? '继续扫描所选图库' : '扫描所选图库'}
+              </Button>
+            )}
           </div>
 
         </Section>

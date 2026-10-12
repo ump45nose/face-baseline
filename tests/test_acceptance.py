@@ -2,6 +2,8 @@ import json
 import shutil
 import subprocess
 import struct
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -221,6 +223,118 @@ def test_api_validation_and_mutex(setup):
             lock.release()
 
 
+def wait_job(store, job_id):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        job = next(j for j in store.jobs() if j['id'] == job_id)
+        if job['finishedAt'] is not None:
+            return job
+        time.sleep(.02)
+    raise AssertionError('扫描任务未结束')
+
+
+def test_stop_waiting_for_stability_and_restart_scan(setup, monkeypatch):
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 80)
+    service.stable_seconds = 60
+    waiting = threading.Event()
+    wait = service.cancel_scan.wait
+    def stable_wait(seconds):
+        waiting.set()
+        return wait(seconds)
+    monkeypatch.setattr(service.cancel_scan, 'wait', stable_wait)
+    service.start()
+    try:
+        job = service.submit(pid)['job']
+        assert waiting.wait(10)
+        service.stop_scans()
+        cancelled = wait_job(store, job['id'])
+        assert cancelled['status'] == 'cancelled' and cancelled['cancelRequested']
+        assert cancelled['fileProcessed'] == 0 and engine.calls == 0
+        service.stable_seconds = 0
+        resumed = wait_job(store, service.submit(pid)['job']['id'])
+        assert resumed['status'] == 'done' and resumed['scored'] == 1
+        assert not resumed['cancelRequested']
+    finally:
+        service.close()
+
+
+def test_stop_during_scoring_preserves_unvisited_photos_locks_and_cache(setup, monkeypatch):
+    from backend.service import BusyError
+    directory, store, engine, service, pid = setup
+    image(directory, 'a.png', 65)
+    image(directory, 'b.png', 75)
+    scan(service)
+    service.lock(pid, state(store, pid)['baselineId'])
+    before = state(store, pid)
+    snapshots = {p: p.read_bytes() for p in (store.data / 'snapshots').rglob('*.png')}
+    image(directory, '0-new.png', 95)
+    image(directory, 'z-new.png', 85)
+    scoring, release = threading.Event(), threading.Event()
+    def block_score():
+        scoring.set()
+        assert release.wait(10)
+    engine.change = block_score
+    service.start()
+    try:
+        job = service.submit(pid)['job']
+        assert scoring.wait(10)
+        queued = service.submit('all')['job']
+        service.stop_scans()
+        assert next(j for j in store.jobs() if j['id'] == queued['id'])['status'] == 'cancelled'
+        running = next(j for j in store.jobs() if j['id'] == job['id'])
+        running['cancelRequested'] = False  # Simulate stale worker progress saved after the request.
+        service.save_job(running)
+        assert running['cancelRequested']
+        with pytest.raises(BusyError):
+            service.submit(pid)
+        release.set()
+        cancelled = wait_job(store, job['id'])
+        assert cancelled['status'] == 'cancelled'
+        assert cancelled['fileProcessed'] == 1 and cancelled['scored'] == 1
+        after = state(store, pid)
+        assert len(after['photos']) == 3
+        assert {p['id'] for p in before['photos']} <= {p['id'] for p in after['photos']}
+        assert after['baselineId'] == before['baselineId'] and after['lockedPhotoId'] == before['lockedPhotoId']
+        assert after['history'] == before['history']
+        assert not after['pendingOperations']
+        assert all(p.read_bytes() == data for p, data in snapshots.items())
+        assert next(p for p in after['photos'] if p['name'] == '0-new.png')['rank'] == 1
+        resumed = wait_job(store, service.submit(pid)['job']['id'])
+        assert resumed['status'] == 'done' and resumed['scored'] == 1
+        assert len(state(store, pid)['photos']) == 4
+    finally:
+        release.set()
+        service.close()
+
+
+def test_stop_api_cancels_queue_without_scan_mutex_and_survives_restart(setup):
+    from fastapi.testclient import TestClient
+    directory, store, engine, service, pid = setup
+    app = create_app(store.data, engine=engine, stable_seconds=0, browse_roots=[directory.parent])
+    client = TestClient(app)
+    queued = app.state.service.submit(pid)['job']
+    app.state.service.mutex.acquire()
+    try:
+        assert client.post('/api/scans/stop', headers={'Origin': 'https://other.example'}).status_code == 403
+        response = client.post('/api/scans/stop')
+        assert response.status_code == 202
+        assert response.json()['jobs'][0]['status'] == 'cancelled'
+        assert client.post('/api/scans/stop').json() == {'jobs': []}
+    finally:
+        app.state.service.mutex.release()
+        client.close()
+    assert next(j for j in store.jobs() if j['id'] == queued['id'])['status'] == 'cancelled'
+    queued.update(status='running', cancelRequested=True, finishedAt=None)
+    store.job(queued)
+    service.start()
+    try:
+        assert next(j for j in store.jobs() if j['id'] == queued['id'])['status'] == 'cancelled'
+        assert engine.calls == 0
+    finally:
+        service.close()
+
+
 def compressed_payload(path):
     data = path.read_bytes()
     if path.suffix.lower() == '.jpg':
@@ -252,13 +366,13 @@ def test_two_observations_detect_partial_write(setup, monkeypatch):
     directory, store, engine, service, pid = setup
     path = image(directory, '写入中.png', 90)
     service.stable_seconds = 0.15
-    wait = service.stop.wait
+    wait = service.cancel_scan.wait
     def write_during_observation_gap(seconds):
         image(directory, path.name, 85)
         return wait(seconds)
-    monkeypatch.setattr(service.stop, 'wait', write_during_observation_gap)
+    monkeypatch.setattr(service.cancel_scan, 'wait', write_during_observation_gap)
     scan(service)
-    monkeypatch.setattr(service.stop, 'wait', wait)
+    monkeypatch.setattr(service.cancel_scan, 'wait', wait)
     assert engine.calls == 0
     assert state(store, pid)['photos'][0]['status'] == 'incomplete'
     assert scan(service)['scored'] == 1

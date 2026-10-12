@@ -1,4 +1,4 @@
-# 人脸基线扫描工具 v1.2
+# 人脸基线扫描工具 v1.3
 
 多选 NAS 文件夹，每个所选目录就是一个独立图库。使用固定 OFIQ 保留 Top K，自动挑选合格基线或保留手动锁定。
 现有 Figma Make 三页设计已接上 FastAPI、SQLite 和串行扫描 worker。
@@ -31,6 +31,8 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 服务只运行一个 Uvicorn worker；扫描、锁定、取消锁定和写回共用互斥锁。
 重复扫描合并；不同范围在已有单人扫描运行时排队，串行执行。服务中断后保留档案与未完成操作；下一次手动扫描继续处理。
 
+设置页扫描区提供「停止扫描」，API 为 `POST /api/scans/stop`。停止请求立即取消排队任务，运行中任务标记 `cancelRequested`；等待文件稳定可立即打断，评分中则完成当前照片和必要写回后结束，任务记录为 `cancelled`。停止请求不等待扫描互斥锁，停止期间不接受新的扫描；未访问的照片不会标记为删除，已完成结果、锁定与历史保留。随后手动扫描继续使用缓存，不重新评分未变化照片。停止请求已持久化，服务重启后也不会恢复该任务。
+
 基线选择或内容/锁定模式变化会记录新版本，快照保存在私有目录。v1 不接生图任务，
 不提供下游版本协议，也不实时监听或发送外部通知。
 
@@ -41,6 +43,10 @@ Linux renameat2 的 RENAME_NOREPLACE 保证原子改名不覆盖其他文件。
 自动基线的初始检查门槛：OFIQ 总分达到配置值、Sharpness ≥70、原始眼间距 ≥70px、人脸宽高 ≥120px、EyesVisible ≥80、EyesOpen ≥70、FaceOcclusionPrevention ≥80、Yaw/Pitch/Roll ≥80、IlluminationUniformity ≥50；任何必需指标无法评估也不自动选择。它们是本工具的初始适用性规则，须经实际图库继续校准。低质量单人照可手动锁定并显示具体原因；多人照不能通过锁定绕过复核。
 
 OFIQ UnifiedQualityScore 来自独立模型，分项用于检查适用性，不是总分的加权解释。升级规则时先撤下尚未复核的自动基线并恢复旧原名，保留锁定 ID、所有历史快照和评分缓存；重新扫描后通过新版单人复核的锁定图继续生效，不能通过的锁定记录仍保留但不作为当前基线。升级不会自行提交扫描；本次修复人工提交图库复核任务。
+
+固定 1.0.3 的总分使用 MagFace 人脸识别质量模型，再以 `round(100/(1+exp((23-raw)/2.6)))` 映射为 0–100。它预测识别用途的质量，不是美观度或生图参考脸的适用性评分；光照与姿态良好不能推导出高总分。[原版实现](https://github.com/BSI-OFIQ/OFIQ-Project/blob/v1.0.3/OFIQlib/modules/measures/src/UnifiedQualityScore.cpp)。当前 Top K 仍按合格优先和总分排序，未实现相近连拍或角度多样性选择。
+
+Tonfotos 官方支持将已确认的人名和人脸区域写入 XMP，也可在导出 JPEG 时包含这些数据；[官方说明](https://tonfotos.com/docs/people/xmp-face-regions/)未提供人脸质量分数的导出字段。因此不能把该功能当作质量评分来源。后续可读取人脸标注辅助人工核对，本工具的质量数据继续写入自己的 XMP 命名空间。
 
 YuNet 模型 SHA256 `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`，来源固定 OpenCV Zoo 提交 `47534e27c9851bb1128ccc0102f1145e27f23f98`，MIT 许可随模型保存在 `/opt/ofiq/yunet/LICENSE`。API 照片字段包含 `eligible`、`qualified`、`qualityIssues`、`assessmentFace` 和 `imageSize`，网页与元数据使用同一后端资格判断。
 

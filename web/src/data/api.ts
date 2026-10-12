@@ -60,6 +60,10 @@ class HttpBaselineApi {
     await this.refresh()
     return result
   }
+  async stopScans() {
+    await this.request('/scans/stop', 'POST')
+    await this.refresh()
+  }
 }
 
 export const api = new HttpBaselineApi()

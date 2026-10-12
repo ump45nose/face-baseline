@@ -70,7 +70,7 @@ export interface FolderListing {
   directories: { path: string; name: string; available: boolean }[]
 }
 
-export type JobStatus = 'queued' | 'running' | 'done' | 'partial' | 'failed'
+export type JobStatus = 'queued' | 'running' | 'done' | 'partial' | 'failed' | 'cancelled'
 
 export interface ScanJob {
   id: string
@@ -86,6 +86,7 @@ export interface ScanJob {
   scored: number
   fileProcessed: number
   fileTotal: number
+  cancelRequested?: boolean
   log: { level: 'info' | 'warn' | 'error'; text: string }[]
 }
 

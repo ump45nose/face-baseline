@@ -168,6 +168,7 @@ export const jobMeta: Record<JobStatus, { label: string; tone: Tone }> = {
   done: { label: '完成', tone: 'moss' },
   partial: { label: '完成 · 有待处理项', tone: 'amber' },
   failed: { label: '扫描失败', tone: 'danger' },
+  cancelled: { label: '已停止', tone: 'neutral' },
 }
 export function JobBadge({ status }: { status: JobStatus }) {
   const m = jobMeta[status]

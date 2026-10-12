@@ -19,6 +19,10 @@ class BusyError(RuntimeError):
     pass
 
 
+class ScanCancelled(Exception):
+    pass
+
+
 class BaselineService:
     def __init__(self, store, engine, stable_seconds=10, browse_roots=None):
         self.store, self.engine = store, engine
@@ -27,6 +31,7 @@ class BaselineService:
         self.jobs_mutex = threading.RLock()
         self.wake = threading.Event()
         self.stop = threading.Event()
+        self.cancel_scan = threading.Event()
         self.writeback = Writeback(store)
         self.thread = None
         self.browse_roots = [Path(p).resolve() for p in (browse_roots or ['/vol3/1000/Picture/YY/人物'])]
@@ -43,14 +48,15 @@ class BaselineService:
         # Scanning is manual: preserve interrupted results without restarting a job.
         for job in self.store.jobs():
             if job['status'] in ('running', 'queued'):
-                job.update(status='failed', finishedAt=now())
-                job['log'].append({'level': 'warn', 'text': '扫描已中断，已有结果保留；请手动扫描继续'})
+                job.update(status='cancelled' if job.get('cancelRequested') else 'failed', finishedAt=now())
+                job['log'].append({'level': 'warn', 'text': '服务重启，扫描已停止，已有结果保留；请手动扫描继续'})
                 self.store.job(job)
         self.thread = threading.Thread(target=self.worker, name='scan-worker', daemon=True)
         self.thread.start()
 
     def close(self):
         self.stop.set()
+        self.cancel_scan.set()
         self.wake.set()
         if self.thread:
             self.thread.join(timeout=5)
@@ -64,6 +70,8 @@ class BaselineService:
             if scope != 'all' and not person:
                 raise ValueError('该目录未选入图库')
             active = [j for j in self.store.jobs() if j['status'] in ('queued', 'running')]
+            if any(j.get('cancelRequested') for j in active):
+                raise BusyError('正在停止扫描，完成当前照片处理后可重新开始')
             for job in active:
                 if job['scope'] == 'all' or job['scope'] == scope or job['status'] == 'queued':
                     if job['status'] == 'queued' and job['scope'] != scope:
@@ -73,7 +81,7 @@ class BaselineService:
                     return {'merged': True, 'job': job}
             job = dict(id=uid(), scope=scope, scopeLabel='所选图库' if scope == 'all' else person['name'],
                        trigger='manual', status='queued', processed=0, total=0, startedAt=now(),
-                       finishedAt=None, merged=0, scored=0, fileProcessed=0, fileTotal=0, log=[])
+                       finishedAt=None, merged=0, scored=0, fileProcessed=0, fileTotal=0, cancelRequested=False, log=[])
             self.store.job(job)
             self.wake.set()
             return {'merged': False, 'job': job}
@@ -82,7 +90,27 @@ class BaselineService:
         with self.jobs_mutex:
             current = next(j for j in self.store.jobs() if j['id'] == job['id'])
             job['merged'] = current['merged']
+            job['cancelRequested'] = current.get('cancelRequested', False)
             self.store.job(job)
+
+    def stop_scans(self):
+        with self.jobs_mutex:
+            jobs = [j for j in self.store.jobs() if j['status'] in ('queued', 'running')]
+            for job in jobs:
+                job['cancelRequested'] = True
+                if job['status'] == 'queued':
+                    job.update(status='cancelled', finishedAt=now())
+                    job['log'].append({'level': 'info', 'text': '已取消排队，未开始扫描'})
+                self.store.job(job)
+            if any(j['status'] == 'running' for j in jobs):
+                self.cancel_scan.set()
+            return {'jobs': jobs}
+
+    def check_cancel(self):
+        if self.stop.is_set():
+            raise RuntimeError('扫描已中断，已有结果保留')
+        if self.cancel_scan.is_set():
+            raise ScanCancelled()
 
     def worker(self):
         while not self.stop.is_set():
@@ -93,16 +121,25 @@ class BaselineService:
                     job = next((j for j in reversed(self.store.jobs()) if j['status'] == 'queued'), None)
                     if not job:
                         break
+                    self.cancel_scan.clear()
                     job['status'] = 'running'
                     self.store.job(job)
                 with self.mutex:
                     try:
                         self.scan(job)
+                    except ScanCancelled:
+                        job['status'] = 'cancelled'
                     except Exception as exc:
                         job['status'] = 'failed'
                         job['log'].append({'level': 'error', 'text': str(exc)})
-                    job['finishedAt'] = now()
-                    self.save_job(job)
+                    with self.jobs_mutex:
+                        self.save_job(job)
+                        if job['cancelRequested'] and job['status'] in ('done', 'partial'):
+                            job['status'] = 'cancelled'
+                        if job['status'] == 'cancelled':
+                            job['log'].insert(0, {'level': 'info', 'text': f'扫描已停止，保留已处理的 {job["fileProcessed"]} 张照片与评分；下次手动扫描跳过未变化照片'})
+                        job['finishedAt'] = now()
+                        self.save_job(job)
 
     def scan(self, job):
         people = self.discover()
@@ -112,14 +149,17 @@ class BaselineService:
         self.save_job(job)
         # Recover file writes before enumeration, including rename interrupted after fs commit.
         for person in people:
+            self.check_cancel()
             self.writeback.repair(person['id'])
         first, paths = {}, {}
         for person in people:
+            self.check_cancel()
             directory = Path(person['directory'])
             if not directory.is_dir():
                 raise ValueError(f'图库目录不可用：{directory}')
             paths[person['id']] = []
             for path in sorted(Path(person['directory']).rglob('*')):
+                self.check_cancel()
                 if path.suffix.lower() not in EXTENSIONS or path.is_symlink() or any(part.startswith('.') for part in path.relative_to(person['directory']).parts):
                     continue
                 if not path.is_file():
@@ -133,30 +173,37 @@ class BaselineService:
         job['fileTotal'] = sum(len(items) for items in paths.values())
         self.save_job(job)
         if first:
-            if self.stop.wait(self.stable_seconds):
-                raise RuntimeError('扫描已中断，已有结果保留')
+            self.cancel_scan.wait(self.stable_seconds)
+        self.check_cancel()
         partial = False
         for person in people:
             seen = set()
             affected = False
-            for path in paths[person['id']]:
-                if self.stop.is_set():
-                    raise RuntimeError('扫描已中断，已有结果保留')
-                try:
-                    st = fingerprint(path)
-                except FileNotFoundError:
-                    continue
-                stable = first.get(str(path)) == st
-                photo, scored, warning, changed = self.process(person, path, st, stable, seen)
-                affected = affected or changed
-                seen.add(photo)
-                job['scored'] += scored
-                job['fileProcessed'] += 1
-                if warning:
-                    partial = True
-                    job['log'].append({'level': 'warn', 'text': f'{person["name"]}：{path.name} · {warning}'})
-                if job['fileProcessed'] % 5 == 0:
-                    self.save_job(job)
+            try:
+                for path in paths[person['id']]:
+                    self.check_cancel()
+                    try:
+                        st = fingerprint(path)
+                    except FileNotFoundError:
+                        continue
+                    stable = first.get(str(path)) == st
+                    photo, scored, warning, changed = self.process(person, path, st, stable, seen)
+                    affected = affected or changed
+                    seen.add(photo)
+                    job['scored'] += scored
+                    job['fileProcessed'] += 1
+                    if warning:
+                        partial = True
+                        job['log'].append({'level': 'warn', 'text': f'{person["name"]}：{path.name} · {warning}'})
+                    if job['fileProcessed'] % 5 == 0:
+                        self.save_job(job)
+                self.check_cancel()
+            except ScanCancelled:
+                # Never mark unvisited photos missing during a partial scan.
+                if affected:
+                    self.reconcile(person['id'], '扫描停止，保留已完成的候选与基线更新')
+                    self.writeback.repair(person['id'])
+                raise
             with self.store.connect() as db:
                 ids = [r['id'] for r in db.execute('SELECT id FROM photos WHERE person_id=? AND present=1', (person['id'],))]
                 affected = affected or bool(set(ids) - seen)

@@ -81,7 +81,7 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
         service.close()
         engine.close()
 
-    app = FastAPI(title='人脸基线', version='1.2.0', lifespan=lifespan)
+    app = FastAPI(title='人脸基线', version='1.3.0', lifespan=lifespan)
     app.state.service = service
 
     @app.exception_handler(ValueError)
@@ -160,6 +160,10 @@ def create_app(data=None, engine=None, stable_seconds=10, web=None, browse_roots
     @app.post('/api/scans', status_code=202)
     def scan(body: Scan):
         return service.submit(body.scope)
+
+    @app.post('/api/scans/stop', status_code=202)
+    def stop_scans():
+        return service.stop_scans()
 
     @app.get('/api/scans')
     def scans():
