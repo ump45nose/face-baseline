@@ -266,7 +266,7 @@ if __name__ == '__main__':
     parser.add_argument('--person', default='ee0088ac7ee04b59b5931f16c44b8f39')
     parser.add_argument('--api', default='http://127.0.0.1:33081/api')
     parser.add_argument('--database', default='/vol2/1000/Docker/face-baseline/data/baseline.sqlite')
-    parser.add_argument('--ser-source', type=Path, default=Path('/vol1/1000/Code/face-quality-reference/SER-FIQ'))
+    parser.add_argument('--ser-source', type=Path, default=Path('/vol1/1000/Code/Others/face-quality-reference/SER-FIQ'))
     parser.add_argument('--preview', type=Path, default=Path('/vol2/1000/Docker/face-baseline/previews/fiqa-xiaoyu'))
     args = parser.parse_args()
     globals()[args.stage](args)
